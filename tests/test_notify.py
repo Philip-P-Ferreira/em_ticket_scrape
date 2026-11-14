@@ -34,8 +34,8 @@ from tests.sample_env import (
     EnvFileFactory,
 )
 from ticket_poller.config import Settings, load_settings
-from ticket_poller.messages import Email, NoticeKind, Push
-from ticket_poller.models import Channel
+from ticket_poller.messages import Email, Push
+from ticket_poller.models import Channel, NoticeKind
 from ticket_poller.notify import (
     Delivery,
     HealthcheckPinger,

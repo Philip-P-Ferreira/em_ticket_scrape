@@ -18,8 +18,8 @@ import httpx
 from ticket_poller import __version__, messages, notify
 from ticket_poller.config import ConfigError, Settings, load_settings, secure_runtime
 from ticket_poller.logsetup import configure_logging
-from ticket_poller.models import Channel
-from ticket_poller.status import render_status
+from ticket_poller.models import Channel, NoticeKind
+from ticket_poller.status import canary_report, render_status
 from ticket_poller.store import NoStateError, Store, StoreError
 
 log = logging.getLogger(__name__)
@@ -71,7 +71,7 @@ def _cmd_poll_once(args: argparse.Namespace, settings: Settings) -> int:
 
 def _send_to_admin(
     settings: Settings,
-    kind: messages.NoticeKind,
+    kind: NoticeKind,
     email: messages.Email | None,
     push: messages.Push | None,
 ) -> notify.Delivery:
@@ -97,14 +97,25 @@ def _cmd_test_notify(args: argparse.Namespace, settings: Settings) -> int:
 
 
 def _cmd_canary_now(args: argparse.Namespace, settings: Settings) -> int:
-    if not args.print:
-        return _not_implemented("canary-now (sending; use --print)", "T3/T6")
-    # TODO(T3/T6): build the report from the store's poll statistics.
-    print("note: poll statistics are not wired yet (store: T3); report is empty", file=sys.stderr)
-    report = messages.CanaryReport(now=datetime.now(UTC))
+    """Render the canary from the read-only store; send it to ADMIN_EMAIL unless --print.
+
+    Never sets ``last_canary_date`` (§12): the scheduled canary still goes out.
+    """
+    try:
+        with Store.open_readonly(settings.db_path) as store:
+            report = canary_report(store, settings, datetime.now(UTC))
+    except NoStateError as exc:
+        print(exc)
+        return ExitCode.OK
+    except StoreError as exc:
+        log.error("%s", exc)
+        return ExitCode.CRASH
     email = messages.canary(report, messages.MessageContext.from_settings(settings))
-    print(f"Subject: {email.subject}\n\n{email.body}", end="")
-    return ExitCode.OK
+    if args.print:
+        print(f"Subject: {email.subject}\n\n{email.body}", end="")
+        return ExitCode.OK
+    delivery = _send_to_admin(settings, NoticeKind.CANARY, email, None)
+    return ExitCode.CRASH if delivery.any_failed else ExitCode.OK
 
 
 def _cmd_status(args: argparse.Namespace, settings: Settings) -> int:

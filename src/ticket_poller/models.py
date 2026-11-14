@@ -50,6 +50,19 @@ class Channel(StrEnum):
     PUSH = "push"
 
 
+class NoticeKind(StrEnum):
+    """What a notification is about; used for routing (alert vs ops topic) and auditing."""
+
+    ALERT = "alert"
+    CANARY = "canary"
+    OUTAGE = "outage"
+    RECOVERED = "recovered"
+    RESALE_ELIGIBLE = "resale_eligible"
+    RESALE_MISSING = "resale_missing"
+    FINISHED = "finished"
+    TEST = "test"
+
+
 @dataclass(frozen=True, slots=True)
 class CapturedResponse:
     url: str

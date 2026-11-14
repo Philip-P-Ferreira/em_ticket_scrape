@@ -22,8 +22,9 @@ from pydantic import SecretStr
 
 from ticket_poller.config import Settings
 from ticket_poller.logsetup import redact
-from ticket_poller.messages import Email, NoticeKind, Push
-from ticket_poller.models import Channel
+from ticket_poller.messages import Email, Push
+from ticket_poller.models import Channel, NoticeKind
+from ticket_poller.schedule import exponential_backoff
 
 log = logging.getLogger(__name__)
 
@@ -54,7 +55,7 @@ HEALTHCHECK_RETRY: Final = RetryPolicy(attempts=2)
 
 def backoff_delay(attempt: int, policy: RetryPolicy, rng: random.Random) -> float:
     """Delay after failed attempt ``attempt`` (1-based): exponential, ±20 % jitter, capped."""
-    base = min(policy.max_delay, policy.first_delay * 2.0 ** (attempt - 1))
+    base = exponential_backoff(attempt, policy.first_delay, policy.max_delay)
     return min(policy.max_delay, base * rng.uniform(0.8, 1.2))
 
 

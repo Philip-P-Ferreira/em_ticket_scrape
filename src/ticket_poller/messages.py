@@ -6,9 +6,8 @@ objects. No secret is ever an input, so none can appear in a message.
 
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, tzinfo
 from decimal import ROUND_DOWN, ROUND_HALF_UP, Decimal
-from enum import StrEnum
 from typing import Final
 from zoneinfo import ZoneInfo
 
@@ -20,11 +19,13 @@ from ticket_poller.models import (
     InventoryType,
     Listing,
     Match,
+    NoticeKind,
     PollOutcome,
     Priority,
     Reason,
     ResaleCapture,
 )
+from ticket_poller.rules import match_sort_key
 
 NTFY_PRIORITY: Final[Mapping[Priority, int]] = {
     Priority.TOP: 5,
@@ -40,19 +41,6 @@ REASON_ORDER: Final = (
     Reason.BELOW_BASELINE,
     Reason.RESALE_LISTED,
 )
-
-
-class NoticeKind(StrEnum):
-    """What a notification is about; used for routing (alert vs ops topic) and auditing."""
-
-    ALERT = "alert"
-    CANARY = "canary"
-    OUTAGE = "outage"
-    RECOVERED = "recovered"
-    RESALE_ELIGIBLE = "resale_eligible"
-    RESALE_MISSING = "resale_missing"
-    FINISHED = "finished"
-    TEST = "test"
 
 
 @dataclass(frozen=True, slots=True)
@@ -120,7 +108,7 @@ class PricePoint:
 
 @dataclass(frozen=True, slots=True)
 class CanaryReport:
-    """Everything the daily canary shows; the caller gathers it from the store.
+    """Everything the daily canary shows; ``status.canary_report`` gathers it from the store.
 
     Counts and lows cover the last 24 h; ``*_now`` values come from the latest
     successful poll. Price mappings are keyed by quantity.
@@ -174,7 +162,8 @@ def format_duration(duration: timedelta) -> str:
     return f"{hours}h{minutes:02d}m" if hours else f"{minutes}m"
 
 
-def _local(moment: datetime, tz: ZoneInfo) -> str:
+def local_time(moment: datetime, tz: tzinfo) -> str:
+    """``2026-11-14 09:12 CST``."""
     return moment.astimezone(tz).strftime("%Y-%m-%d %H:%M %Z")
 
 
@@ -199,18 +188,8 @@ def _range_label(quantities: Iterable[int]) -> str:
     return _compact_quantities(quantities).replace("-", EN_DASH).replace(",", "/")
 
 
-def _sort_key(match: Match) -> tuple[Priority, bool, int, str]:
-    # Same order as rules.match_sort_key (§6.5).
-    return (
-        match.priority,
-        not match.within_preferred_price,
-        match.listing.price_cents,
-        match.listing.identity,
-    )
-
-
 def sort_matches(matches: Iterable[Match]) -> list[Match]:
-    return sorted(matches, key=_sort_key)
+    return sorted(matches, key=match_sort_key)
 
 
 # --- alert pieces -----------------------------------------------------------------------------
@@ -373,7 +352,7 @@ def alert_email(
             "",
             f"Baseline: {ctx.baseline_window_days}-day median of cheapest {wanted} seat primary "
             f"= {baseline_text(baseline, ctx)}",
-            f"Seen {_local(now, ctx.tz)}. Inventory moves fast — these may already be gone.",
+            f"Seen {local_time(now, ctx.tz)}. Inventory moves fast — these may already be gone.",
             f"{choose} on the page; TM may assign different seats.",
         )
     )
@@ -494,7 +473,7 @@ def canary(report: CanaryReport, ctx: MessageContext) -> Email:
         f"Alerts (24 h): {report.alerts:,} ({report.great_deals:,} GREAT DEAL) "
         f"· channel failures: {failures}",
         f"Browser recycles: {report.browser_recycles:,} · Version {__version__} "
-        f"· Auto-stop {_local(ctx.stop_after, ctx.tz)}",
+        f"· Auto-stop {local_time(ctx.stop_after, ctx.tz)}",
     )
     return Email(f"ticket-poller daily canary — {status}", "\n".join(lines) + "\n")
 
@@ -548,7 +527,7 @@ def outage(
     """Polling has been failing for ``FAILURE_ALERT_AFTER_MINUTES`` (one notice per outage)."""
     duration = format_duration(failing_for)
     tally = ", ".join(f"{o.value} {n}" for o in PollOutcome if (n := counts.get(o, 0)))
-    retry = _local(next_retry_at, ctx.tz) if next_retry_at is not None else "unknown"
+    retry = local_time(next_retry_at, ctx.tz) if next_retry_at is not None else "unknown"
     body = [
         f"Polling has been failing for {duration} ({outcome.value}).",
         f"Last detail: {last_detail or '(none)'}",
@@ -630,7 +609,7 @@ def finished(*, ctx: MessageContext) -> Notice:
         NoticeKind.FINISHED,
         "ticket-poller stopped: event date passed",
         [
-            f"Auto-stop time {_local(ctx.stop_after, ctx.tz)} has passed; the poller exited.",
+            f"Auto-stop time {local_time(ctx.stop_after, ctx.tz)} has passed; the poller exited.",
             "Disable the service: systemctl --user disable --now ticket-poller",
         ],
         3,

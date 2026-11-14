@@ -28,6 +28,7 @@ from ticket_poller.models import (
     InventoryType,
     Listing,
     Match,
+    NoticeKind,
     PollOutcome,
     PriceSnapshot,
     Priority,
@@ -35,8 +36,6 @@ from ticket_poller.models import (
 )
 
 BUSY_TIMEOUT_MS: Final = 5000
-ALERT_KIND: Final = "alert"
-"""``notifications.kind`` for listing alerts; admin notices use their own kinds."""
 SNAPSHOT_QUANTITIES: Final = (2, 3)
 """Quantities with per-quantity cheapest-price columns in ``polls``."""
 
@@ -159,7 +158,7 @@ class PollRecord:
     matches: int | None = None
     new_matches: int | None = None
     primary_labels: Mapping[int, str] = field(default_factory=dict)
-    """Per quantity, "section/row" of the cheapest primary listing in ``snapshot``."""
+    """Per quantity, where the cheapest primary listing in ``snapshot`` is (e.g. ``123 M``)."""
     resale_labels: Mapping[int, str] = field(default_factory=dict)
     browser_recycled: bool = False
     """The browser was restarted during this poll."""
@@ -181,6 +180,8 @@ class PollStats:
     cheapest_primary_label: Mapping[int, str | None]
     """Per quantity, the label of the listing behind ``cheapest_primary``."""
     cheapest_resale_label: Mapping[int, str | None]
+    resale_listings_now: int
+    """Resale listings in the latest successful poll in the window (0 if none)."""
     low_primary: Mapping[int, int | None]
     """Per quantity, the lowest cheapest price over the window."""
     low_resale: Mapping[int, int | None]
@@ -547,6 +548,7 @@ class Store:
             cheapest_resale=_by_qty(latest, _price_column, InventoryType.RESALE),
             cheapest_primary_label=_by_qty(latest, _label_column, InventoryType.PRIMARY),
             cheapest_resale_label=_by_qty(latest, _label_column, InventoryType.RESALE),
+            resale_listings_now=(latest["resale_listings"] or 0) if latest is not None else 0,
             low_primary=self._lowest_cheapest(InventoryType.PRIMARY, start),
             low_resale=self._lowest_cheapest(InventoryType.RESALE, start),
             alerts=self._scalar(
@@ -599,7 +601,7 @@ class Store:
         rows = self._conn.execute(
             """SELECT channel, COUNT(*) FROM notifications
                WHERE sent_at >= ? AND kind = ? AND NOT ok GROUP BY channel""",
-            (start, ALERT_KIND),
+            (start, NoticeKind.ALERT.value),
         )
         failures = dict.fromkeys(Channel, 0)
         failures.update({Channel(channel): count for channel, count in rows})
@@ -612,14 +614,14 @@ class Store:
     # --- notifications audit -------------------------------------------------------------
 
     def log_notification(
-        self, kind: str, channel: Channel, ok: bool, subject: str, now: datetime
+        self, kind: NoticeKind, channel: Channel, ok: bool, subject: str, now: datetime
     ) -> None:
-        """Record one channel attempt (alerts use ``ALERT_KIND``)."""
+        """Record one channel attempt (the audit trail behind the canary and status)."""
         with self.transaction():
             self._conn.execute(
                 """INSERT INTO notifications (sent_at, kind, channel, ok, subject)
                    VALUES (?, ?, ?, ?, ?)""",
-                (_ts(now), kind, channel.value, ok, subject),
+                (_ts(now), kind.value, channel.value, ok, subject),
             )
 
     def last_alert_attempts(self) -> dict[Channel, AlertAttempt]:
@@ -627,7 +629,7 @@ class Store:
         rows = self._conn.execute(
             """SELECT channel, sent_at, ok FROM notifications
                WHERE id IN (SELECT MAX(id) FROM notifications WHERE kind = ? GROUP BY channel)""",
-            (ALERT_KIND,),
+            (NoticeKind.ALERT.value,),
         )
         return {
             Channel(channel): AlertAttempt(_from_ts(sent_at), bool(ok))

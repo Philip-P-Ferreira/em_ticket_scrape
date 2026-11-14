@@ -1,14 +1,17 @@
+import dataclasses
 from collections.abc import Iterator
 from datetime import UTC, date, datetime, timedelta
+from decimal import Decimal
 
 import pytest
 
 from tests.sample_env import EnvFileFactory
 from ticket_poller.cli import ExitCode, main
 from ticket_poller.config import Settings, load_settings
-from ticket_poller.models import Channel, PollOutcome, PriceSnapshot, ResaleCapture
-from ticket_poller.status import render_status
-from ticket_poller.store import ALERT_KIND, PollRecord, RuntimeState, Store
+from ticket_poller.messages import PricePoint
+from ticket_poller.models import Channel, NoticeKind, PollOutcome, PriceSnapshot, ResaleCapture
+from ticket_poller.status import canary_report, render_status
+from ticket_poller.store import PollRecord, RuntimeState, Store
 
 NOW = datetime(2026, 11, 14, 15, 0, tzinfo=UTC)  # 09:00 CST
 
@@ -59,8 +62,9 @@ def test_populated_state(store: Store, settings: Settings) -> None:
     store.record_poll(
         PollRecord(started_at=NOW - timedelta(minutes=5), outcome=PollOutcome.BLOCKED, detail="403")
     )
-    store.log_notification(ALERT_KIND, Channel.EMAIL, True, "alert", NOW - timedelta(minutes=30))
-    store.log_notification(ALERT_KIND, Channel.PUSH, False, "alert", NOW - timedelta(minutes=30))
+    sent_at = NOW - timedelta(minutes=30)
+    store.log_notification(NoticeKind.ALERT, Channel.EMAIL, True, "alert", sent_at)
+    store.log_notification(NoticeKind.ALERT, Channel.PUSH, False, "alert", sent_at)
     store.save_state(
         RuntimeState(last_canary_date=date(2026, 11, 14), resale_eligible=True).record_failure(
             PollOutcome.BLOCKED, NOW - timedelta(minutes=5)
@@ -88,6 +92,48 @@ def test_announced_outage_and_pending_recovery(store: Store, settings: Settings)
     store.save_state(failing.record_success(NOW + timedelta(hours=2)))
 
     assert "Failures: none · recovery notice pending" in render_status(store, settings, NOW)
+
+
+class TestCanaryReport:
+    def test_empty_state(self, store: Store, settings: Settings) -> None:
+        report = canary_report(store, settings, NOW)
+
+        assert report.now == NOW
+        assert report.total_polls == 0
+        assert report.primary_now == report.resale_now == {2: None, 3: None}
+        assert report.baseline is not None
+        assert report.baseline.samples == 0
+        assert report.resale_eligible is None
+
+    def test_maps_stats_and_state(self, store: Store, settings: Settings) -> None:
+        store.record_poll(ok_poll(NOW - timedelta(days=2), 1000))  # baseline only, not 24 h
+        store.record_poll(
+            dataclasses.replace(
+                ok_poll(NOW - timedelta(hours=1), 34350),
+                snapshot=PriceSnapshot(34350, {2: 34350, 3: 38350}, {2: 30000, 3: None}),
+                primary_labels={2: "104 R", 3: "123 M"},
+                resale_labels={2: "201 A"},
+                browser_recycled=True,
+            )
+        )
+        store.log_notification(NoticeKind.ALERT, Channel.PUSH, False, "alert", NOW)
+        failing = RuntimeState(resale_eligible=True).record_failure(PollOutcome.ERROR, NOW)
+        store.save_state(failing)
+
+        report = canary_report(store, settings, NOW)
+
+        assert report.outcomes[PollOutcome.OK] == 1
+        assert report.last_success_at == NOW - timedelta(hours=1)
+        assert (report.failing_since, report.consecutive_failures) == (NOW, 1)
+        assert report.primary_now == {2: PricePoint(34350, "104 R"), 3: PricePoint(38350, "123 M")}
+        assert report.resale_now == {2: PricePoint(30000, "201 A"), 3: None}
+        assert report.primary_low == {2: 34350, 3: 38350}
+        assert report.baseline is not None
+        assert (report.baseline.median_cents, report.baseline.samples) == (Decimal(17675), 2)
+        assert report.resale_eligible is True
+        assert (report.resale_captured_polls, report.resale_listings_now) == (1, 2)
+        assert report.channel_failures == {Channel.EMAIL: 0, Channel.PUSH: 1}
+        assert report.browser_recycles == 1
 
 
 class TestStatusCommand:

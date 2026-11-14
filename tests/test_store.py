@@ -16,6 +16,7 @@ from ticket_poller.models import (
     InventoryType,
     Listing,
     Match,
+    NoticeKind,
     PollOutcome,
     PriceSnapshot,
     Priority,
@@ -23,7 +24,6 @@ from ticket_poller.models import (
     ResaleCapture,
 )
 from ticket_poller.store import (
-    ALERT_KIND,
     BUSY_TIMEOUT_MS,
     MIGRATIONS,
     AlertAttempt,
@@ -608,6 +608,7 @@ class TestStats:
         assert stats.last_success_at is None
         assert stats.cheapest_primary == stats.low_resale == {2: None, 3: None}
         assert stats.cheapest_primary_label == stats.cheapest_resale_label == {2: None, 3: None}
+        assert stats.resale_listings_now == 0
         assert stats.browser_recycles == 0
         assert (stats.alerts, stats.top_alerts, stats.resale_captured) == (0, 0, 0)
         assert stats.channel_failures == {Channel.EMAIL: 0, Channel.PUSH: 0}
@@ -635,6 +636,7 @@ class TestStats:
                 at(hours=2),
                 outcome=PollOutcome.PARTIAL,
                 resale_capture=ResaleCapture.MISSING,
+                resale_listings=3,
                 snapshot=snapshot(600, {2: 600, 3: 700}, {2: None, 3: None}),
                 primary_labels={2: "Sec 104 Row R", 3: "Sec 105 Row A"},
             )
@@ -659,6 +661,7 @@ class TestStats:
         assert stats.cheapest_resale == {2: None, 3: None}
         assert stats.cheapest_primary_label == {2: "Sec 104 Row R", 3: "Sec 105 Row A"}
         assert stats.cheapest_resale_label == {2: None, 3: None}
+        assert stats.resale_listings_now == 3  # the latest success, not the poll before it
         assert stats.browser_recycles == 3
         assert stats.low_primary == {2: 500, 3: 700}
         assert stats.low_resale == {2: 800, 3: None}
@@ -673,11 +676,11 @@ class TestStats:
         deliver(store, primary("B"), at(hours=1), *Channel, priority=Priority.TOP)
         deliver(store, primary("C"), at(hours=2), Channel.EMAIL, priority=Priority.NORMAL)
         failures = [
-            (ALERT_KIND, Channel.PUSH, False, at(hours=1)),
-            (ALERT_KIND, Channel.PUSH, False, at(hours=2)),
-            (ALERT_KIND, Channel.EMAIL, True, at(hours=2)),
-            (ALERT_KIND, Channel.EMAIL, False, T0 - DAY),
-            ("outage", Channel.EMAIL, False, at(hours=3)),
+            (NoticeKind.ALERT, Channel.PUSH, False, at(hours=1)),
+            (NoticeKind.ALERT, Channel.PUSH, False, at(hours=2)),
+            (NoticeKind.ALERT, Channel.EMAIL, True, at(hours=2)),
+            (NoticeKind.ALERT, Channel.EMAIL, False, T0 - DAY),
+            (NoticeKind.OUTAGE, Channel.EMAIL, False, at(hours=3)),
         ]
         for kind, channel, ok, when in failures:
             store.log_notification(kind, channel, ok, "subject", when)
@@ -690,10 +693,10 @@ class TestStats:
 
 class TestNotifications:
     def test_last_alert_attempt_per_channel(self, store: Store) -> None:
-        store.log_notification(ALERT_KIND, Channel.EMAIL, True, "a", T0)
-        store.log_notification(ALERT_KIND, Channel.EMAIL, False, "b", at(minutes=5))
-        store.log_notification(ALERT_KIND, Channel.PUSH, True, "c", at(minutes=5))
-        store.log_notification("canary", Channel.PUSH, False, "d", at(minutes=10))
+        store.log_notification(NoticeKind.ALERT, Channel.EMAIL, True, "a", T0)
+        store.log_notification(NoticeKind.ALERT, Channel.EMAIL, False, "b", at(minutes=5))
+        store.log_notification(NoticeKind.ALERT, Channel.PUSH, True, "c", at(minutes=5))
+        store.log_notification(NoticeKind.CANARY, Channel.PUSH, False, "d", at(minutes=10))
 
         assert store.last_alert_attempts() == {
             Channel.EMAIL: AlertAttempt(at(minutes=5), ok=False),
