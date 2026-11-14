@@ -23,7 +23,7 @@ from ticket_poller.schedule import (
     outage_deadline,
     poll_delay,
 )
-from ticket_poller.store import RuntimeState
+from ticket_poller.state import RuntimeState
 
 CHICAGO = ZoneInfo("America/Chicago")
 T0 = datetime(2026, 11, 14, 15, 0, tzinfo=UTC)

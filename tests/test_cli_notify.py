@@ -14,7 +14,8 @@ from ticket_poller.config import Settings, load_settings
 from ticket_poller.messages import Email, Push
 from ticket_poller.models import NoticeKind, PollOutcome, PriceSnapshot, ResaleCapture
 from ticket_poller.notify import Delivery
-from ticket_poller.store import PollRecord, Store
+from ticket_poller.state import PollRecord
+from ticket_poller.store import Store
 
 
 @dataclass

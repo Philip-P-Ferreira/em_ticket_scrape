@@ -9,7 +9,8 @@ from ticket_poller.messages import CanaryReport, PricePoint, local_time, money
 from ticket_poller.models import Baseline, Channel, PollOutcome
 from ticket_poller.rules import compute_baseline
 from ticket_poller.schedule import canary_due, next_canary_at, outage_deadline
-from ticket_poller.store import AlertAttempt, PollRecord, RuntimeState, Store
+from ticket_poller.state import PollRecord, RuntimeState
+from ticket_poller.store import AlertAttempt, Store
 
 RECENT_POLLS: Final = 5
 CANARY_WINDOW: Final = timedelta(hours=24)

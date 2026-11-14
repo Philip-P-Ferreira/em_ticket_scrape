@@ -47,8 +47,9 @@ from ticket_poller.schedule import (
     outage_deadline,
     poll_delay,
 )
+from ticket_poller.state import PollRecord, RuntimeState
 from ticket_poller.status import canary_report, current_baseline
-from ticket_poller.store import PollRecord, Resolved, RuntimeState, Store, key_matches
+from ticket_poller.store import Resolved, Store, key_matches
 from ticket_poller.watchdog import NoWatchdog, Watchdog
 
 log = logging.getLogger(__name__)

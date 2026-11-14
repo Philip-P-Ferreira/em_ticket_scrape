@@ -10,8 +10,9 @@ from ticket_poller.cli import ExitCode, main
 from ticket_poller.config import Settings, load_settings
 from ticket_poller.messages import PricePoint
 from ticket_poller.models import Channel, NoticeKind, PollOutcome, PriceSnapshot, ResaleCapture
+from ticket_poller.state import PollRecord, RuntimeState
 from ticket_poller.status import canary_report, render_status
-from ticket_poller.store import PollRecord, RuntimeState, Store
+from ticket_poller.store import Store
 
 NOW = datetime(2026, 11, 14, 15, 0, tzinfo=UTC)  # 09:00 CST
 

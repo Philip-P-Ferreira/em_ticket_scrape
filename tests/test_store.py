@@ -23,14 +23,13 @@ from ticket_poller.models import (
     Reason,
     ResaleCapture,
 )
+from ticket_poller.state import PollRecord, RuntimeState
 from ticket_poller.store import (
     BUSY_TIMEOUT_MS,
     MIGRATIONS,
     AlertAttempt,
     NoStateError,
-    PollRecord,
     Resolved,
-    RuntimeState,
     SchemaVersionError,
     Store,
     StoreError,

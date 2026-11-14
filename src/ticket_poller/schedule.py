@@ -13,7 +13,7 @@ from typing import Final, Protocol, Self
 
 from ticket_poller.config import Settings
 from ticket_poller.models import PollOutcome
-from ticket_poller.store import RuntimeState
+from ticket_poller.state import RuntimeState
 
 FAILURE_JITTER_FRACTION: Final = 0.2
 
