@@ -22,8 +22,10 @@ from tests.sample_env import (
 )
 from ticket_poller.config import (
     ConfigError,
+    ConfigPath,
     RuleConfig,
     Settings,
+    Text,
     check_env_file,
     dollars_to_cents,
     ensure_private_dir,
@@ -34,6 +36,14 @@ from ticket_poller.config import (
 
 def _mode(path: Path) -> int:
     return stat.S_IMODE(path.stat().st_mode)
+
+
+_NON_EMPTY_TYPES: tuple[object, ...] = (Text, ConfigPath)
+_NON_EMPTY_KEYS = [
+    name.upper()
+    for name, info in Settings.model_fields.items()
+    if info.annotation in _NON_EMPTY_TYPES
+]
 
 
 class TestDefaults:
@@ -130,12 +140,6 @@ class TestParsing:
 
         assert load_settings().sender_email == SENDER_EMAIL
 
-    def test_legacy_healthcheck_key_is_accepted(self, make_env_file: EnvFileFactory) -> None:
-        settings = load_settings(make_env_file(HEALTHCHECKS_PING_URL=None, HEALTHCHECK_URL=HC_URL))
-
-        assert settings.healthchecks_ping_url is not None
-        assert settings.healthchecks_ping_url.get_secret_value() == HC_URL
-
     @pytest.mark.parametrize("key", ["NTFY_OPS_TOPIC", "NTFY_TOKEN", "HEALTHCHECKS_PING_URL"])
     def test_empty_optional_secret_is_unset(self, make_env_file: EnvFileFactory, key: str) -> None:
         settings = load_settings(make_env_file(**{key: ""}))
@@ -219,6 +223,31 @@ class TestValidation:
 
         assert value not in str(caught.value)
         assert caught.value.__cause__ is None
+
+    def test_every_text_and_path_setting_uses_a_non_empty_type(self) -> None:
+        bare = [
+            name for name, info in Settings.model_fields.items() if info.annotation in (str, Path)
+        ]
+
+        assert not bare
+        assert {"EVENT_NAME", "EVENT_URL", "CHROMIUM_PATH", "STATE_DIR"} <= set(_NON_EMPTY_KEYS)
+
+    @pytest.mark.parametrize("value", ["", "   "])
+    @pytest.mark.parametrize("key", _NON_EMPTY_KEYS)
+    def test_empty_text_or_path_rejected(
+        self, make_env_file: EnvFileFactory, key: str, value: str
+    ) -> None:
+        with pytest.raises(ConfigError, match=f"{key}: Value error, must not be empty"):
+            load_settings(make_env_file(**{key: value}))
+
+    def test_empty_path_in_process_environment_rejected(
+        self, make_env_file: EnvFileFactory, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        path = make_env_file()
+        monkeypatch.setenv("CHROMIUM_PATH", "")
+
+        with pytest.raises(ConfigError, match="CHROMIUM_PATH: Value error, must not be empty"):
+            load_settings(path)
 
     def test_explicit_missing_env_file(self, tmp_path: Path) -> None:
         with pytest.raises(ConfigError, match="not found"):

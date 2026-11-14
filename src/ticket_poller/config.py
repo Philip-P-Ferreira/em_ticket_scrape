@@ -2,7 +2,8 @@
 
 ``load_settings()`` is the only code path that reads the env file, and it checks the
 file's permissions first. An empty value (``KEY=``) means "none" for list settings
-and optional secrets; any other setting validates it as given instead of using the default.
+and optional secrets; text and path settings reject it, and any other setting validates
+it as given instead of using the default.
 
 ``Settings`` must never be logged or formatted directly; use ``Settings.summary()``,
 which shows only non-sensitive values and reports secrets as ``set``/``unset``.
@@ -21,7 +22,8 @@ from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import (
-    AliasChoices,
+    AfterValidator,
+    BeforeValidator,
     Field,
     NonNegativeFloat,
     NonNegativeInt,
@@ -32,7 +34,6 @@ from pydantic import (
     field_validator,
     model_validator,
 )
-from pydantic.fields import FieldInfo
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 log = logging.getLogger(__name__)
@@ -51,6 +52,17 @@ type LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
 # NoDecode: these are comma-separated in the environment, not JSON.
 type Quantities = Annotated[frozenset[int], NoDecode]
 type CsvStrings = Annotated[tuple[str, ...], NoDecode]
+
+
+def _reject_blank(value: object) -> object:
+    if isinstance(value, str) and not value.strip():
+        raise ValueError("must not be empty")
+    return value
+
+
+# Without these, ``KEY=`` would be accepted as "" (or as Path("."), the working directory).
+type Text = Annotated[str, BeforeValidator(_reject_blank)]
+type ConfigPath = Annotated[Path, BeforeValidator(_reject_blank), AfterValidator(Path.expanduser)]
 
 
 class ConfigError(Exception):
@@ -86,14 +98,14 @@ class Settings(BaseSettings):
     )
 
     # Event
-    event_id: str = Field("2000655CAB442FB5", pattern=r"^[A-Za-z0-9]+$")
-    event_url: str = (
+    event_id: Text = Field("2000655CAB442FB5", pattern=r"^[A-Za-z0-9]+$")
+    event_url: Text = (
         "https://www.ticketmaster.com/noah-kahan-the-last-of-the-birmingham-alabama-04-27-2027"
         "/event/2000655CAB442FB5"
     )
-    event_name: str = "Noah Kahan — Protective Stadium, Birmingham AL"
+    event_name: Text = "Noah Kahan — Protective Stadium, Birmingham AL"
     event_date: date = date(2027, 4, 27)
-    timezone: str = "America/Chicago"
+    timezone: Text = "America/Chicago"
     stop_after: datetime = datetime(2027, 4, 28)  # naive values are interpreted in `timezone`
 
     # Polling and backoff
@@ -116,35 +128,31 @@ class Settings(BaseSettings):
     canary_hour: int = Field(8, ge=0, le=23)
 
     # Browser
-    chromium_path: Path = Path("/usr/bin/chromium")
-    browser_profile_dir: Path = Path("~/.local/share/em_ticket_scrape/chromium-profile")
+    chromium_path: ConfigPath = Path("/usr/bin/chromium")
+    browser_profile_dir: ConfigPath = Path("~/.local/share/em_ticket_scrape/chromium-profile")
     browser_extra_args: CsvStrings = ("--ozone-platform=x11",)
     browser_recycle_hours: PositiveFloat = 6.0
     capture_timeout_seconds: PositiveFloat = 20.0
     capture_settle_seconds: NonNegativeFloat = 3.0
 
     # State
-    state_dir: Path = Path("~/.local/share/em_ticket_scrape")
+    state_dir: ConfigPath = Path("~/.local/share/em_ticket_scrape")
 
     # Email
-    smtp_host: str = "smtp.gmail.com"
+    smtp_host: Text = "smtp.gmail.com"
     smtp_port: int = Field(587, ge=1, le=65535)
     smtp_timeout_seconds: PositiveFloat = 20.0
-    sender_email: str
+    sender_email: Text
     sender_app_password: SecretStr
     alert_recipients: CsvStrings = ("philip@ferreira-family.com",)
-    admin_email: str = "philip@ferreira-family.com"
+    admin_email: Text = "philip@ferreira-family.com"
 
     # Push and monitoring
-    ntfy_server: str = "https://ntfy.sh"
+    ntfy_server: Text = "https://ntfy.sh"
     ntfy_topic: SecretStr
     ntfy_ops_topic: SecretStr | None = None
     ntfy_token: SecretStr | None = None
-    healthchecks_ping_url: SecretStr | None = Field(
-        None,
-        # HEALTHCHECK_URL is the key already present in the operator's .env.
-        validation_alias=AliasChoices("HEALTHCHECKS_PING_URL", "HEALTHCHECK_URL"),
-    )
+    healthchecks_ping_url: SecretStr | None = None
 
     log_level: LogLevel = "INFO"
 
@@ -172,11 +180,6 @@ class Settings(BaseSettings):
     @classmethod
     def _upper_level(cls, value: object) -> object:
         return value.strip().upper() if isinstance(value, str) else value
-
-    @field_validator("chromium_path", "browser_profile_dir", "state_dir")
-    @classmethod
-    def _expand_user(cls, value: Path) -> Path:
-        return value.expanduser()
 
     @field_validator("timezone")
     @classmethod
@@ -308,9 +311,8 @@ class Settings(BaseSettings):
 
     def summary(self) -> str:
         """A loggable ``KEY=value`` view of the configuration; secrets show as set/unset."""
-        fields = type(self).model_fields
         return "\n".join(
-            f"{_env_key(name, info)}={self._display(name)}" for name, info in fields.items()
+            f"{name.upper()}={self._display(name)}" for name in type(self).model_fields
         )
 
     def _display(self, name: str) -> str:
@@ -328,13 +330,6 @@ class Settings(BaseSettings):
                 return value.isoformat()
             case _:
                 return str(value)
-
-
-def _env_key(name: str, info: FieldInfo) -> str:
-    alias = info.validation_alias
-    if isinstance(alias, AliasChoices) and isinstance(alias.choices[0], str):
-        return alias.choices[0]
-    return name.upper()
 
 
 def _check_email(value: str) -> str:

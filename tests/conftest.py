@@ -15,7 +15,7 @@ from ticket_poller.config import Settings
 
 def _env_keys() -> set[str]:
     keys = {name.upper() for name in Settings.model_fields}
-    return keys | {"ENV_FILE", "HEALTHCHECK_URL", "JOURNAL_STREAM"}
+    return keys | {"ENV_FILE", "JOURNAL_STREAM"}
 
 
 @pytest.fixture(autouse=True)
