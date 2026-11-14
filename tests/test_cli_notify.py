@@ -173,3 +173,39 @@ class TestCanaryNow:
 
         assert main(["canary-now"]) == 1
         assert len(fake_notifier.sent) == 1
+
+
+class TestNotifyFailure:
+    def test_pushes_to_ops_only_even_with_a_corrupt_database(
+        self,
+        make_env_file: EnvFileFactory,
+        fake_notifier: FakeNotifier,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        make_env_file()
+        settings = load_settings()
+        settings.db_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        settings.db_path.write_bytes(b"not a database")
+
+        assert main(["notify-failure", "ticket-poller.service"]) == 0
+
+        ((kind, email, push, _to),) = fake_notifier.sent
+        assert (kind, email) == (NoticeKind.SERVICE_FAILED, None)
+        assert push is not None
+        assert push.title == (
+            "Ticket poller service FAILED — check journalctl --user -u ticket-poller"
+        )
+        assert push.message == "systemd unit ticket-poller.service entered the failed state."
+        assert capsys.readouterr().out.splitlines()[-2:] == ["email: skipped", "push: ok"]
+
+    def test_unit_is_optional_and_a_failed_push_exits_1(
+        self, make_env_file: EnvFileFactory, fake_notifier: FakeNotifier
+    ) -> None:
+        make_env_file()
+        fake_notifier.push_ok = False
+
+        assert main(["notify-failure"]) == 1
+
+        ((_kind, _email, push, _to),) = fake_notifier.sent
+        assert push is not None
+        assert push.message == push.title

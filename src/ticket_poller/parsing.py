@@ -130,6 +130,7 @@ def parse_inventory(responses: Iterable[CapturedResponse], wanted: frozenset[int
             offers.setdefault(_str(offer, "offerId"), offer)
 
     groups: list[SeatGroup] = []
+    degraded: list[str] = []
     quickpick_qtys: set[int] = set()
     for url, body in captured:
         if not _is_quickpicks(url):
@@ -139,7 +140,7 @@ def parse_inventory(responses: Iterable[CapturedResponse], wanted: frozenset[int
             warnings.append("quickpicks response without a qty parameter ignored")
             continue
         quickpick_qtys.add(qty)
-        groups.extend(_quickpick_groups(body, qty, offers, warnings))
+        groups.extend(_quickpick_groups(body, qty, offers, warnings, degraded))
 
     inferred = wanted - quickpick_qtys
     for qty in sorted(inferred):
@@ -159,25 +160,37 @@ def parse_inventory(responses: Iterable[CapturedResponse], wanted: frozenset[int
         inferred_quantities=inferred,
         resale_requested=resale_requested(url for url, _ in captured),
         warnings=tuple(dict.fromkeys(warnings)),
+        degraded=tuple(dict.fromkeys(degraded)),
     )
 
 
 def _quickpick_groups(
-    body: Json, qty: int, offers: Mapping[str, Json], warnings: list[str]
+    body: Json, qty: int, offers: Mapping[str, Json], warnings: list[str], degraded: list[str]
 ) -> list[SeatGroup]:
+    """The seat groups of one quickpicks payload.
+
+    Malformed picks/groups, and picks of which no group could be read at all, are added
+    to both ``warnings`` and ``degraded``: they mean the payload format may have changed.
+    """
     picks = _list(body, "picks")
     total, offset = body.get("total"), body.get("offset", 0)
     if _is_int(total) and _is_int(offset) and total > offset + len(picks):
         warnings.append(f"quickpicks truncated (qty={qty}: {len(picks)} of {total})")
 
+    def malformed(warning: str) -> None:
+        warnings.append(warning)
+        degraded.append(warning)
+
     groups: list[SeatGroup] = []
+    accounted = 0
+    """Groups parsed, or skipped for a known reason (resale, protected, offline)."""
     for raw_pick in picks:
         try:
             pick = _mapping(raw_pick, "quickpicks pick")
             section, row = _str(pick, "section"), _opt_str(pick, "row")
             raw_groups = _list(pick, "offerGroups")
         except ParseError as error:
-            warnings.append(f"malformed quickpicks pick skipped: {error}")
+            malformed(f"malformed quickpicks pick skipped: {error}")
             continue
         max_quantity = pick.get("maxQuantity")
         for raw_group in raw_groups:
@@ -189,13 +202,18 @@ def _quickpick_groups(
                     qty=qty,
                     max_quantity=max_quantity if _is_int(max_quantity) else None,
                     offers=offers,
-                    warnings=warnings,
                 )
             except ParseError as error:
-                warnings.append(f"malformed quickpicks group for {section} {row} skipped: {error}")
+                malformed(f"malformed quickpicks group for {section} {row} skipped: {error}")
                 continue
-            if group is not None:
+            if isinstance(group, SeatGroup):
                 groups.append(group)
+            elif isinstance(group, str):
+                warnings.append(group)
+                continue
+            accounted += 1
+    if picks and not accounted:
+        malformed(f"quickpicks qty={qty}: no seat group parsed from {len(picks)} pick(s)")
     return groups
 
 
@@ -207,20 +225,25 @@ def _seat_group(
     qty: int,
     max_quantity: int | None,
     offers: Mapping[str, Json],
-    warnings: list[str],
-) -> SeatGroup | None:
+) -> SeatGroup | str | None:
+    """The group's primary seat group; else a warning, or None if skipping it is expected.
+
+    Resale offers (parsed as resale listings) and protected/offline primary offers (not
+    buyable) are expected reasons to skip a group; any other offer means it was not read.
+    """
     offer_group = _mapping(raw_group, "quickpicks offerGroup")
     known = [o for o in _str_list(offer_group, "offers") if o in offers]
     if not known:
-        warnings.append(f"quickpicks offer missing for {section} {row}; group skipped")
-        return None
+        return f"quickpicks offer missing for {section} {row}; group skipped"
     offer_id = next((o for o in known if _is_buyable_primary(offers[o])), None)
     if offer_id is None:
-        return None
+        types = sorted({_inventory_type(offers[o]) for o in known})
+        if any(t in (InventoryType.PRIMARY, InventoryType.RESALE) for t in types):
+            return None
+        return f"quickpicks group for {section} {row} skipped: no primary offer (types {types})"
     places = frozenset(_str_list(offer_group, "places"))
     if not places:
-        warnings.append(f"quickpicks group without places for {section} {row}; skipped")
-        return None
+        return f"quickpicks group without places for {section} {row}; skipped"
     return SeatGroup(
         offer_id=offer_id,
         section=section,
@@ -261,7 +284,7 @@ def _primary_listing(group: SeatGroup, offers: Mapping[str, Json]) -> Listing:
 def _resale_listings(offers: Iterable[Json], warnings: list[str]) -> tuple[Listing, ...]:
     listings: dict[str, Listing] = {}
     for offer in offers:
-        inventory_type = offer.get("inventoryType", InventoryType.PRIMARY)
+        inventory_type = _inventory_type(offer)
         if inventory_type == InventoryType.RESALE:
             if _is_buyable(offer):
                 listing = _resale_listing(offer)
@@ -292,9 +315,13 @@ def _is_buyable(offer: Json) -> bool:
     return offer.get("protected") is not True and offer.get("online") is not False
 
 
+def _inventory_type(offer: Json) -> str:
+    """The offer's ``inventoryType``; an offer without one is primary."""
+    return str(offer.get("inventoryType", InventoryType.PRIMARY))
+
+
 def _is_buyable_primary(offer: Json) -> bool:
-    is_primary = offer.get("inventoryType", InventoryType.PRIMARY) == InventoryType.PRIMARY
-    return is_primary and _is_buyable(offer)
+    return _inventory_type(offer) == InventoryType.PRIMARY and _is_buyable(offer)
 
 
 def _has_resale_facet(body: Json) -> bool:

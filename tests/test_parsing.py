@@ -260,8 +260,55 @@ def test_missing_offer_skips_the_group_with_a_warning() -> None:
         [quickpicks(2, [make_pick(make_group([1, 2], offers=["GONE"]))])], frozenset({2})
     )
 
+    no_groups = "quickpicks qty=2: no seat group parsed from 1 pick(s)"
     assert inventory.primary == ()
-    assert inventory.warnings == ("quickpicks offer missing for 101 N; group skipped",)
+    assert inventory.warnings == ("quickpicks offer missing for 101 N; group skipped", no_groups)
+    assert inventory.degraded == (no_groups,)
+
+
+def test_a_group_with_an_unknown_offer_type_is_skipped_with_a_warning() -> None:
+    offers = [make_offer("X", inventory_type="mystery"), make_offer()]
+    picks = [make_pick(make_group([1, 2], offers=["X"])), make_pick(make_group([3, 4]))]
+
+    inventory = parse_inventory([quickpicks(2, picks, offers)], frozenset({2}))
+
+    assert [lst.seats for lst in inventory.primary] == ["3\u20134"]
+    assert inventory.warnings == (
+        "quickpicks group for 101 N skipped: no primary offer (types ['mystery'])",
+        "ignored offer with inventoryType 'mystery'",
+    )
+    assert inventory.degraded == ()
+
+
+def test_picks_with_only_expected_skips_are_not_degraded() -> None:
+    offers = [make_offer("P", protected=True), make_resale_offer("L9")]
+    picks = [
+        make_pick(make_group([1, 2], offers=["P"])),
+        make_pick(make_group([3], offers=["RES-L9"])),
+    ]
+
+    inventory = parse_inventory([quickpicks(2, picks, offers)], frozenset({2}))
+
+    assert inventory.primary == ()
+    assert (inventory.warnings, inventory.degraded) == ((), ())
+
+
+def test_picks_with_no_readable_group_are_degraded() -> None:
+    picks = [{"row": "N", "offerGroups": [make_group([3, 4])]}]
+
+    inventory = parse_inventory([quickpicks(2, picks, [make_offer()])], frozenset({2}))
+
+    assert inventory.degraded == (
+        "malformed quickpicks pick skipped: 'section': expected a non-empty string, got None",
+        "quickpicks qty=2: no seat group parsed from 1 pick(s)",
+    )
+    assert inventory.warnings == inventory.degraded
+
+
+def test_empty_quickpicks_are_not_degraded() -> None:
+    inventory = parse_inventory([quickpicks(2, [], [make_offer()])], frozenset({2}))
+
+    assert (inventory.warnings, inventory.degraded) == ((), ())
 
 
 def test_offers_embedded_in_another_payload_are_joined() -> None:
@@ -363,7 +410,7 @@ def test_malformed_pick_or_group_is_skipped_with_a_warning(
     inventory = parse_inventory([quickpicks(2, picks, [make_offer()])], frozenset({2}))
 
     assert [lst.seats for lst in inventory.primary] == ["1\u20132"]
-    assert inventory.warnings == (warning,)
+    assert inventory.warnings == inventory.degraded == (warning,)
 
 
 def test_protected_and_offline_resale_offers_are_skipped() -> None:

@@ -175,10 +175,10 @@ def pragma(store: Store, name: str) -> object:
 
 
 class TestOpening:
-    def test_writer_creates_schema_v1(self, store: Store) -> None:
+    def test_writer_creates_the_latest_schema(self, store: Store) -> None:
         tables = {row[0] for row in store._conn.execute("SELECT name FROM sqlite_master")}
 
-        assert pragma(store, "user_version") == schema_version() == 1
+        assert pragma(store, "user_version") == schema_version() == 2
         assert {"polls", "listings", "alert_deliveries", "notifications", "kv"} <= tables
         assert {"polls_started_at", "listings_offer"} <= tables
 
@@ -195,7 +195,7 @@ class TestOpening:
             first.record_poll(ok_poll(T0))
 
         with Store.open_writer(db_path) as second:
-            assert pragma(second, "user_version") == 1
+            assert pragma(second, "user_version") == schema_version()
             assert len(second.recent_polls(10)) == 1
 
     def test_readonly_on_missing_file_does_not_create_it(self, db_path: Path) -> None:
@@ -236,36 +236,53 @@ def test_corrupt_file_is_a_store_error(db_path: Path, opener: Callable[[Path], S
 
 
 class TestMigrations:
-    V2 = ("ALTER TABLE polls ADD COLUMN extra INTEGER",)
+    NEXT = ("ALTER TABLE polls ADD COLUMN extra INTEGER",)
 
     def test_only_the_writer_migrates(
         self, store: Store, db_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         store.close()
-        monkeypatch.setattr(store_module, "MIGRATIONS", (*MIGRATIONS, self.V2))
+        current = schema_version()
+        monkeypatch.setattr(store_module, "MIGRATIONS", (*MIGRATIONS, self.NEXT))
 
         with pytest.raises(SchemaVersionError, match="older"):
             Store.open_readonly(db_path)
-        assert raw_pragma(db_path, "user_version") == [(1,)]
+        assert raw_pragma(db_path, "user_version") == [(current,)]
 
         with Store.open_writer(db_path) as writer:
             columns = {row[1] for row in writer._conn.execute("PRAGMA table_info(polls)")}
-            assert pragma(writer, "user_version") == 2
+            assert pragma(writer, "user_version") == current + 1
             assert "extra" in columns
         with Store.open_readonly(db_path) as readonly:
-            assert pragma(readonly, "user_version") == 2
+            assert pragma(readonly, "user_version") == current + 1
+
+    def test_v1_database_gains_parser_health_columns(self, db_path: Path) -> None:
+        conn = sqlite3.connect(db_path)
+        for statement in MIGRATIONS[0]:
+            conn.execute(statement)
+        conn.execute("INSERT INTO polls (started_at, outcome) VALUES (?, 'ok')", (T0.isoformat(),))
+        conn.execute("PRAGMA user_version = 1")
+        conn.commit()
+        conn.close()
+
+        with Store.open_writer(db_path) as writer:
+            [old] = writer.recent_polls(1)
+            assert pragma(writer, "user_version") == schema_version()
+
+        assert (old.parse_warnings, old.parse_degraded) == (None, False)
 
     def test_failed_migration_rolls_back(
         self, store: Store, db_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         store.close()
+        current = schema_version()
         broken = ("ALTER TABLE polls ADD COLUMN extra INTEGER", "NOT VALID SQL")
         monkeypatch.setattr(store_module, "MIGRATIONS", (*MIGRATIONS, broken))
 
         with pytest.raises(StoreError, match="cannot open"):
             Store.open_writer(db_path)
 
-        assert raw_pragma(db_path, "user_version") == [(1,)]
+        assert raw_pragma(db_path, "user_version") == [(current,)]
         assert "extra" not in {row[1] for row in raw_pragma(db_path, "table_info(polls)")}
 
 
@@ -548,6 +565,44 @@ class TestRearm:
         assert res.rearmed is False
         assert store.pending(key_matches([match(listing)], [res]), Channel.EMAIL) == []
 
+    def test_resale_absence_counts_only_polls_that_captured_resale(self, store: Store) -> None:
+        listing = resale("L1")
+        deliver(store, listing, T0, *Channel, priority=Priority.NORMAL)
+        for hour in range(1, 31):
+            missing = ResaleCapture.MISSING if hour % 2 else ResaleCapture.NOT_ELIGIBLE
+            store.record_poll(
+                PollRecord(at(hours=hour), PollOutcome.PARTIAL, resale_capture=missing)
+            )
+
+        [during] = store.resolve([listing], at(hours=31), REARM)
+        store.record_poll(ok_poll(at(hours=32)))
+        [early] = store.resolve([listing], at(hours=55), REARM)
+        [due] = store.resolve([listing], at(hours=56), REARM)
+
+        assert (during.rearmed, early.rearmed, due.rearmed) == (False, False, True)
+
+    def test_primary_absence_counts_partial_polls(self, store: Store) -> None:
+        listing = primary("A", "B")
+        deliver(store, listing, T0, *Channel, priority=Priority.NORMAL)
+        store.record_poll(
+            PollRecord(at(hours=1), PollOutcome.PARTIAL, resale_capture=ResaleCapture.MISSING)
+        )
+
+        [res] = store.resolve([listing], at(hours=25), REARM)
+
+        assert res.rearmed is True
+
+    def test_a_degraded_parse_is_not_absence(self, store: Store) -> None:
+        listing = primary("A", "B")
+        deliver(store, listing, T0, *Channel, priority=Priority.NORMAL)
+        store.record_poll(ok_poll(at(hours=1), outcome=PollOutcome.PARTIAL, parse_degraded=True))
+        poll(store, at(hours=10))
+
+        [early] = store.resolve([listing], at(hours=33), REARM)
+        [due] = store.resolve([listing], at(hours=34), REARM)
+
+        assert (early.rearmed, due.rearmed) == (False, True)
+
     def test_pending_honours_rearm_without_observe(self, store: Store) -> None:
         listing = primary("A", "B")
         deliver(store, listing, T0, *Channel, priority=Priority.NORMAL)
@@ -568,6 +623,8 @@ class TestPolls:
             primary_labels={2: "Sec 104 Row R", 3: "Sec 105 Row A"},
             resale_labels={3: "Sec 101 Row N"},
             browser_recycled=True,
+            parse_warnings=2,
+            parse_degraded=True,
         )
         failed = PollRecord(
             started_at=at(minutes=5), outcome=PollOutcome.BLOCKED, detail="HTTP 403"
@@ -673,6 +730,26 @@ class TestStats:
         assert stats.browser_recycles == 3
         assert stats.low_primary == {2: 500, 3: 700}
         assert stats.low_resale == {2: 800, 3: None}
+
+    def test_parser_health_and_missing_resale(self, store: Store) -> None:
+        store.record_poll(ok_poll(T0 - DAY, parse_warnings=3, parse_degraded=True))
+        store.record_poll(ok_poll(at(hours=1), parse_warnings=0))
+        store.record_poll(ok_poll(at(hours=2), parse_warnings=1))
+        store.record_poll(
+            ok_poll(
+                at(hours=3),
+                outcome=PollOutcome.PARTIAL,
+                resale_capture=ResaleCapture.MISSING,
+                parse_warnings=2,
+                parse_degraded=True,
+            )
+        )
+        store.record_poll(PollRecord(at(hours=4), PollOutcome.ERROR))
+
+        stats = store.stats_since(T0)
+
+        assert (stats.parse_warning_polls, stats.parse_degraded_polls) == (2, 1)
+        assert stats.resale_missing == 1
 
     def test_last_success_looks_beyond_the_window(self, store: Store) -> None:
         store.record_poll(ok_poll(T0 - DAY))
@@ -816,6 +893,13 @@ class TestRuntimeStateTransitions:
 
         assert RuntimeState().record_canary(today, email_ok=False).last_canary_date is None
         assert RuntimeState().record_canary(today, email_ok=True).last_canary_date == today
+
+    def test_email_failing_episode_ends_on_a_delivered_email(self) -> None:
+        failing = RuntimeState(consecutive_email_failures=2, email_failing_notice_sent=True)
+
+        assert failing.record_email(ok=False).consecutive_email_failures == 3
+        assert failing.record_email(ok=False).email_failing_notice_sent is True
+        assert failing.record_email(ok=True) == RuntimeState()
 
 
 class TestConcurrency:

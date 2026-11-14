@@ -55,6 +55,7 @@ class TestParser:
         assert canary.print is True
         assert parser.parse_args(["run"]).needs_lock is True
         assert parser.parse_args(["status"]).needs_lock is False
+        assert parser.parse_args(["notify-failure"]).needs_lock is False
 
 
 class TestMain:
@@ -94,6 +95,21 @@ class TestMain:
 
         assert main(["status"]) == ExitCode.CONFIG
         assert "not a directory" in capsys.readouterr().out
+
+    def test_run_with_a_corrupt_database_exits_78(
+        self,
+        make_env_file: EnvFileFactory,
+        tmp_path: Path,
+        stopped_fetcher: FakeFetcher,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        make_env_file()
+        state_dir = tmp_path / "state"
+        state_dir.mkdir(mode=0o700)
+        (state_dir / "state.sqlite3").write_bytes(b"not a database" * 100)
+
+        assert main(["run"]) == ExitCode.CONFIG
+        assert "state database unusable, not restarting" in caplog.text
 
     def test_command_prepares_private_state(
         self, make_env_file: EnvFileFactory, tmp_path: Path, stopped_fetcher: FakeFetcher

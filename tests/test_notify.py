@@ -521,7 +521,7 @@ class TestNotifier:
             NoticeKind.ALERT, email=EMAIL, push=PUSH, to=RECIPIENTS
         )
 
-        assert delivery == Delivery(email=False, push=True)
+        assert delivery == Delivery(email=False, push=True, email_auth_failed=True)
         assert delivery.result(Channel.EMAIL) is False
         assert delivery.ok(Channel.PUSH)
         assert (delivery.any_ok, delivery.any_failed) == (True, True)

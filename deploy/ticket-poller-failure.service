@@ -1,0 +1,18 @@
+# systemd user unit: pushes "service FAILED" to the ntfy ops topic (design §16).
+# Started by OnFailure= in ticket-poller.service; installed by deploy/install.sh, which
+# rewrites the repo paths below if the checkout is not at ~/repos/em_ticket_scrape.
+# It needs only .env (no state database, no email), so it works when the DB is corrupt.
+
+[Unit]
+Description=Ticketmaster poller failure push
+Documentation=file://%h/repos/em_ticket_scrape/README.md
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/repos/em_ticket_scrape
+ExecStart=%h/repos/em_ticket_scrape/.venv/bin/ticket-poller notify-failure ticket-poller.service
+TimeoutStartSec=2min
+Environment=PYTHONUNBUFFERED=1
+UMask=0077
+SyslogIdentifier=ticket-poller-failure
+NoNewPrivileges=yes

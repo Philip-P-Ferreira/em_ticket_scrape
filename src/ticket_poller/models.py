@@ -63,6 +63,8 @@ class NoticeKind(StrEnum):
     RESALE_ELIGIBLE = "resale_eligible"
     RESALE_MISSING = "resale_missing"
     FINISHED = "finished"
+    EMAIL_FAILING = "email_failing"
+    SERVICE_FAILED = "service_failed"
     TEST = "test"
 
 
@@ -126,6 +128,8 @@ class Inventory:
     resale_requested: bool
     """A captured request asked for resale (§7)."""
     warnings: tuple[str, ...]
+    degraded: tuple[str, ...] = ()
+    """The warnings meaning the parser dropped data it should have read (a format change)."""
 
 
 @dataclass(frozen=True, slots=True)

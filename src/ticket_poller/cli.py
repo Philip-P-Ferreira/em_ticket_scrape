@@ -23,6 +23,7 @@ from ticket_poller.models import Channel, NoticeKind
 from ticket_poller.schedule import SystemClock
 from ticket_poller.status import canary_report, render_status
 from ticket_poller.store import NoStateError, Store, StoreError
+from ticket_poller.watchdog import Watchdog
 
 log = logging.getLogger(__name__)
 
@@ -37,7 +38,7 @@ class ExitCode(IntEnum):
     OK = 0  # event over, signal, or command succeeded
     CRASH = 1
     LOCK_HELD = 75  # EX_TEMPFAIL
-    CONFIG = 78  # EX_CONFIG: invalid settings or unsafe .env
+    CONFIG = 78  # EX_CONFIG: invalid settings, unsafe .env, or an unusable state database
 
 
 class LockHeldError(Exception):
@@ -64,12 +65,16 @@ def _cmd_run(args: argparse.Namespace, settings: Settings) -> int:
     try:
         store = Store.open_writer(settings.db_path)
     except StoreError as exc:
-        log.error("%s", exc)
-        return ExitCode.CRASH
+        # A restart would fail the same way, so exit with the code systemd won't restart on.
+        log.error("state database unusable, not restarting: %s", exc)
+        return ExitCode.CONFIG
     stop = threading.Event()
-    with ExitStack() as stack:
-        service = _build_poller(stack, settings, store, stop, live=True)
+    watchdog = Watchdog(settings.watchdog_timeout_sec)
+    watchdog.start()
+    with closing(watchdog), ExitStack() as stack:
+        service = _build_poller(stack, settings, store, stop, live=True, watchdog=watchdog)
         reason = service.run()
+        watchdog.busy("shutdown")  # the stack closes the browser next
     log.info("exited: %s", reason.value)
     return ExitCode.OK
 
@@ -81,6 +86,7 @@ def _build_poller(
     stop: threading.Event,
     *,
     live: bool,
+    watchdog: Watchdog | None = None,
 ) -> poller.Poller:
     """Wire the poller; ``stack`` closes the store, browser and HTTP client in reverse order.
 
@@ -100,6 +106,7 @@ def _build_poller(
         notify.build_pinger(settings, client, stop=stop),
         clock,
         stop,
+        watchdog=watchdog,
     )
 
 
@@ -181,6 +188,13 @@ def _cmd_test_notify(args: argparse.Namespace, settings: Settings) -> int:
     return ExitCode.CRASH if delivery.any_failed else ExitCode.OK
 
 
+def _cmd_notify_failure(args: argparse.Namespace, settings: Settings) -> int:
+    """Ops push only, for systemd ``OnFailure=``: needs no state database and no email."""
+    push = messages.service_failed(unit=args.unit)
+    delivery = _send_to_admin(settings, NoticeKind.SERVICE_FAILED, None, push)
+    return ExitCode.OK if delivery.ok(Channel.PUSH) else ExitCode.CRASH
+
+
 def _cmd_canary_now(args: argparse.Namespace, settings: Settings) -> int:
     """Render the canary from the read-only store; send it to ADMIN_EMAIL unless --print.
 
@@ -257,6 +271,14 @@ def build_parser() -> argparse.ArgumentParser:
         "canary-now", _cmd_canary_now, "render the daily canary and send it to admin", lock=False
     )
     canary_now.add_argument("--print", action="store_true", help="print instead of sending")
+
+    notify_failure = add(
+        "notify-failure",
+        _cmd_notify_failure,
+        "push 'service FAILED' to the ops topic (run by ticket-poller-failure.service)",
+        lock=False,
+    )
+    notify_failure.add_argument("unit", nargs="?", help="the failed systemd unit, for the text")
 
     add("status", _cmd_status, "show polling, outage, baseline and delivery state", lock=False)
     return parser

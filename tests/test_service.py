@@ -4,15 +4,25 @@ A real ``Store`` on ``tmp_path`` and a real ``Notifier``; the fetcher, senders, 
 clock are fakes, so nothing touches a browser or the network.
 """
 
+import logging
 import random
+import smtplib
 from collections.abc import Callable, Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 import pytest
 
-from tests.builders import facets, load_captured, make_group, make_offer, make_pick, quickpicks
+from tests.builders import (
+    facets,
+    load_captured,
+    make_group,
+    make_offer,
+    make_pick,
+    make_resale_offer,
+    quickpicks,
+)
 from tests.fake_clock import FakeClock
 from tests.fakes import FakeEmailSender, FakePinger, FakePushSender, ScriptedFetcher
 from tests.sample_env import EnvFileFactory
@@ -23,8 +33,17 @@ from ticket_poller.fetcher import Fetcher
 from ticket_poller.messages import Email
 from ticket_poller.models import CapturedResponse, Channel, FetchResult, PollOutcome
 from ticket_poller.notify import Notifier
-from ticket_poller.poller import ExitReason, Poller, PollReport, audit_to, render_report
+from ticket_poller.poller import (
+    EMAIL_FAILURES_BEFORE_PUSH,
+    MAX_WAIT_SECONDS,
+    ExitReason,
+    Poller,
+    PollReport,
+    audit_to,
+    render_report,
+)
 from ticket_poller.store import Store
+from ticket_poller.watchdog import Watchdog
 
 T0 = datetime(2026, 11, 14, 12, 0, tzinfo=UTC)  # 06:00 in Chicago: no canary due for 2 h
 PRIMARY = (load_captured("nk_facets_inventorytypes_offer"), load_captured("nk_quickpicks_qty2"))
@@ -279,8 +298,71 @@ def test_canary_at_8am_across_dst_retries_a_failed_email(make_service: ServiceFa
     ]
     canary_to = {to for email, to in svc.email.sent if "daily canary" in email.subject}
     assert canary_to == {(svc.settings.admin_email,)}
-    assert svc.ops_push.sent == []
-    assert svc.store.get_state().last_canary_date == date(2027, 3, 14)
+    assert svc.ops_push.titles == ["ticket-poller: email delivery failing"]
+    state = svc.store.get_state()
+    assert state.last_canary_date == date(2027, 3, 14)
+    assert (state.consecutive_email_failures, state.email_failing_notice_sent) == (0, False)
+
+
+# --- email failing: one ops push per episode ----------------------------------------------------
+
+EMAIL_FAILING = "ticket-poller: email delivery failing"
+
+
+def test_repeatedly_failing_alert_emails_push_once_until_an_email_gets_through(
+    make_service: ServiceFactory,
+) -> None:
+    svc = make_service(NK)
+    svc.email.fail = True
+
+    for _ in range(EMAIL_FAILURES_BEFORE_PUSH - 1):
+        svc.poll()
+    assert svc.ops_push.titles == []
+    for _ in range(3):
+        svc.poll()
+
+    assert svc.ops_push.titles == [EMAIL_FAILING]
+    assert "3 email send(s) in a row failed" in svc.ops_push.sent[0].message
+    state = svc.store.get_state()
+    assert (state.consecutive_email_failures, state.email_failing_notice_sent) == (5, True)
+
+    svc.email.fail = False
+    svc.poll()  # the owed alert email is delivered: the episode ends
+
+    state = svc.store.get_state()
+    assert (state.consecutive_email_failures, state.email_failing_notice_sent) == (0, False)
+    assert svc.ops_push.titles == [EMAIL_FAILING]
+
+
+def test_a_rejected_smtp_login_pushes_at_once(make_service: ServiceFactory) -> None:
+    svc = make_service(NK)
+
+    def reject(email: Email) -> None:
+        raise smtplib.SMTPAuthenticationError(535, b"bad credentials")
+
+    svc.email.on_send = reject
+
+    svc.poll()
+
+    (push,) = svc.ops_push.sent
+    assert push.title == EMAIL_FAILING
+    assert "SENDER_APP_PASSWORD" in push.message
+
+
+def test_a_failed_email_failing_push_is_retried_on_the_next_failed_email(
+    make_service: ServiceFactory,
+) -> None:
+    svc = make_service(NK)
+    svc.email.fail = svc.ops_push.fail = True
+    for _ in range(EMAIL_FAILURES_BEFORE_PUSH):
+        svc.poll()
+    assert svc.store.get_state().email_failing_notice_sent is False
+
+    svc.ops_push.fail = False
+    svc.poll()
+
+    assert svc.ops_push.titles == [EMAIL_FAILING]
+    assert svc.store.get_state().email_failing_notice_sent is True
 
 
 # --- 6, 7: upgrade and re-arm -------------------------------------------------------------------
@@ -328,6 +410,34 @@ def test_listing_back_after_24h_absence_alerts_again(
     assert len(nk_alerts) == alerts
 
 
+RESALE_L1 = fetched(facets([make_resale_offer("L1")]), resale_eligible=True)
+RESALE_MISSING = fetched(facets([]), resale_eligible=True)
+RESALE_NONE = fetched(
+    replace(facets([]), url=facets([]).url + "&includeResale=true"), resale_eligible=True
+)
+
+
+@pytest.mark.parametrize(
+    ("absent", "outcome", "alerts"),
+    [(RESALE_MISSING, PollOutcome.PARTIAL, 1), (RESALE_NONE, PollOutcome.OK, 2)],
+    ids=["resale-not-captured", "resale-captured-without-it"],
+)
+def test_resale_listing_back_after_24h_of_partial_polls_does_not_alert_again(
+    make_service: ServiceFactory, absent: FetchResult, outcome: PollOutcome, alerts: int
+) -> None:
+    svc = make_service(RESALE_L1, absent, absent, RESALE_L1)
+
+    svc.poll()
+    svc.clock.advance(5 * 60)
+    assert svc.poll().outcome is outcome
+    svc.clock.advance(25 * 3600)
+    assert svc.poll().outcome is outcome
+    svc.clock.advance(5 * 60)
+    svc.poll()
+
+    assert len(svc.alert_push.sent) == alerts
+
+
 # --- 8: resale MISSING --------------------------------------------------------------------------
 
 
@@ -345,6 +455,51 @@ def test_missing_resale_capture_is_partial_and_noticed_once(make_service: Servic
     ]
     admin = [to for email, to in svc.email.sent if email.subject.startswith("ticket-poller:")]
     assert admin == [(svc.settings.admin_email,)] * 2
+
+
+# --- parser health ------------------------------------------------------------------------------
+
+
+def unreadable_quickpicks(picks: int) -> FetchResult:
+    """Quickpicks whose every group points at an offer missing from the response."""
+    groups = [
+        make_pick(make_group([1, 2], offers=["GONE"], row=row), row=row)
+        for row in "ABCDEFGH"[:picks]
+    ]
+    return fetched(*PRIMARY, quickpicks(3, groups, []))
+
+
+def test_unreadable_quickpicks_are_a_degraded_partial_poll(
+    make_service: ServiceFactory, caplog: pytest.LogCaptureFixture
+) -> None:
+    svc = make_service(unreadable_quickpicks(6))
+
+    with caplog.at_level(logging.WARNING, logger="ticket_poller"):
+        report = svc.poll()
+
+    assert report.outcome is PollOutcome.PARTIAL
+    assert report.detail.startswith("parse degraded: quickpicks qty=3: no seat group parsed")
+    assert svc.pinger.pings == 1
+    (poll,) = svc.store.recent_polls(1)
+    assert (poll.outcome, poll.parse_warnings, poll.parse_degraded) == (
+        PollOutcome.PARTIAL,
+        7,
+        True,
+    )
+    parse_lines = [r.getMessage() for r in caplog.records if "parse warning" in r.getMessage()]
+    assert len(parse_lines) == 4
+    assert parse_lines[0].startswith("parse warning (degraded): quickpicks qty=3: no seat group")
+    assert parse_lines[-1] == "4 more parse warnings this poll (1 degraded in total)"
+    assert all(r.levelno == logging.WARNING for r in caplog.records if "parse" in r.getMessage())
+
+
+def test_parse_warnings_degrade_the_next_canary(make_service: ServiceFactory) -> None:
+    svc = make_service(unreadable_quickpicks(1), NK)
+
+    svc.run_for(timedelta(hours=2, minutes=5))
+
+    (canary,) = (email for email, _ in svc.email.sent if "daily canary" in email.subject)
+    assert canary.subject.endswith("DEGRADED: parse warnings in 1 polls (1 degraded)")
 
 
 # --- 9: shutdown --------------------------------------------------------------------------------
@@ -463,6 +618,88 @@ def test_failed_poll_closes_the_browser_for_a_relaunch(make_service: ServiceFact
     assert svc.fetcher.closes == 1
 
 
+# --- loop robustness: wall-clock steps and the watchdog -----------------------------------------
+
+
+def test_idle_waits_are_capped_at_60s_without_extra_polls_or_logs(
+    make_service: ServiceFactory, caplog: pytest.LogCaptureFixture
+) -> None:
+    svc = make_service(BLOCKED, BLOCKED, NK)
+
+    with caplog.at_level(logging.DEBUG, logger="ticket_poller"):
+        svc.run_for(minutes(49))
+
+    assert svc.poll_times() == [minutes(m) for m in (0, 15, 45)]
+    assert max(svc.clock.waits) <= MAX_WAIT_SECONDS
+    assert len(svc.clock.waits) > 45
+    assert len(caplog.records) < 15
+
+
+def test_a_backward_clock_step_does_not_delay_the_next_poll(
+    make_service: ServiceFactory, caplog: pytest.LogCaptureFixture
+) -> None:
+    waited_at_fetch: list[float] = []
+
+    def poll() -> FetchResult:
+        waited_at_fetch.append(sum(svc.clock.waits))
+        return NK
+
+    svc = make_service(poll)
+    stepped = False
+    real_wait = svc.clock.wait
+
+    def wait(seconds: float) -> bool:
+        nonlocal stepped
+        if not stepped and waited_at_fetch:
+            stepped = True
+            svc.clock.advance(-2 * 3600)  # NTP steps the wall clock back by 2 h
+        return real_wait(seconds)
+
+    svc.clock.wait = wait  # type: ignore[method-assign]
+    svc.clock.until = T0 + minutes(7)
+    svc.poller.run()
+
+    first, second, *_ = waited_at_fetch
+    assert second - first == 300
+    steps = [r for r in caplog.records if "wall clock stepped back" in r.getMessage()]
+    assert len(steps) == 1
+
+
+class RecordingWatchdog(Watchdog):
+    def __init__(self) -> None:
+        self.exits: list[int] = []
+        self.marks: list[str] = []
+        super().__init__(900, exit_fn=self.exits.append)
+
+    def busy(self, what: str) -> None:
+        self.marks.append(what)
+        super().busy(what)
+
+    def idle(self) -> None:
+        self.marks.append("idle")
+        super().idle()
+
+
+def test_the_loop_is_busy_only_while_working(make_service: ServiceFactory) -> None:
+    svc = make_service(BLOCKED, NK)
+    watchdog = RecordingWatchdog()
+    svc.poller._watchdog = watchdog
+    waits_while_busy: list[str] = []
+    real_wait = svc.clock.wait
+
+    def wait(seconds: float) -> bool:
+        if watchdog._busy is not None and seconds > 30:  # notifier retries stay short
+            waits_while_busy.append(watchdog._busy[0])
+        return real_wait(seconds)
+
+    svc.clock.wait = wait  # type: ignore[method-assign]
+    svc.run_for(minutes(19))
+
+    assert watchdog.marks == ["poll", "browser close", "notices", "idle", "poll", "notices", "idle"]
+    assert waits_while_busy == []
+    assert watchdog.exits == []
+
+
 # --- robustness: bugs and restarts must not kill the loop or hammer the site ------------------
 
 
@@ -531,7 +768,9 @@ def test_a_failed_notice_due_during_a_slow_poll_waits_for_the_next_wake(
 
     svc = make_service(BLOCKED, BLOCKED, slow_block, BLOCKED)
     attempts: list[timedelta] = []
-    svc.ops_push.on_send = lambda push: attempts.append(svc.minutes())
+    svc.ops_push.on_send = lambda push: (
+        attempts.append(svc.minutes()) if push.title.startswith(OUTAGE) else None
+    )
     svc.email.fail = svc.ops_push.fail = True
 
     svc.run_for(minutes(130))

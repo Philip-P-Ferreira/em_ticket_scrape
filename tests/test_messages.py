@@ -336,6 +336,7 @@ class TestCanary:
         report = CanaryReport(
             now=NOW,
             outcomes={PollOutcome.PARTIAL: 3, PollOutcome.BLOCKED: 5},
+            resale_missing_polls=3,
             failing_since=NOW - timedelta(hours=2, minutes=5),
             consecutive_failures=5,
             resale_eligible=True,
@@ -348,6 +349,28 @@ class TestCanary:
         )
         assert "streak: 5 failures since 07:59" in email.body
         assert "Resale: eligible yes · captured 0/3 polls" in email.body
+
+    def test_parse_warnings_degrade_the_canary(self) -> None:
+        report = CanaryReport(
+            now=NOW,
+            outcomes={PollOutcome.OK: 5, PollOutcome.PARTIAL: 1},
+            parse_warning_polls=2,
+            parse_degraded_polls=1,
+        )
+
+        email = canary(report, CTX)
+
+        assert email.subject == (
+            "ticket-poller daily canary — DEGRADED: parse warnings in 2 polls (1 degraded)"
+        )
+        assert email.body.splitlines()[-1] == (
+            "Parser: parse warnings in 2 polls (1 degraded) — see journalctl -p warning"
+        )
+
+    def test_partial_polls_without_missing_resale_are_not_resale_degraded(self) -> None:
+        report = CanaryReport(now=NOW, outcomes={PollOutcome.PARTIAL: 2})
+
+        assert canary(report, CTX).subject.endswith("— OK")
 
     def test_short_failure_is_not_degraded(self) -> None:
         report = CanaryReport(

@@ -286,6 +286,8 @@ class Delivery:
 
     email: bool | None = None
     push: bool | None = None
+    email_auth_failed: bool = False
+    """The SMTP server rejected the login: retrying will not help."""
 
     def result(self, channel: Channel) -> bool | None:
         return self.email if channel is Channel.EMAIL else self.push
@@ -340,6 +342,7 @@ class Notifier:
         push: Push | None = None,
     ) -> Delivery:
         email_ok = push_ok = None
+        email_errors: list[Exception] = []
         if email is not None and not to:
             log.error("%s email not sent: no recipients", kind.value)
             email_ok = False
@@ -352,6 +355,7 @@ class Notifier:
                 lambda: self._email_sender.send(email, to=to),
                 SMTP_RETRY,
                 smtp_retryable,
+                email_errors,
             )
         if push is not None:
             sender = self._alert_push if kind is NoticeKind.ALERT else self._ops_push
@@ -363,7 +367,8 @@ class Notifier:
                 NTFY_RETRY,
                 http_retryable,
             )
-        return Delivery(email=email_ok, push=push_ok)
+        auth_failed = any(isinstance(e, smtplib.SMTPAuthenticationError) for e in email_errors)
+        return Delivery(email=email_ok, push=push_ok, email_auth_failed=auth_failed)
 
     def _attempt(
         self,
@@ -373,7 +378,9 @@ class Notifier:
         send: Callable[[], None],
         policy: RetryPolicy,
         retryable: Callable[[Exception], bool],
+        errors: list[Exception] | None = None,
     ) -> bool | None:
+        """Send with retries; the final exception of a failed attempt goes to ``errors``."""
         if self._stop.is_set():
             log.info("%s %s not sent: stopping", kind.value, channel.value)
             return None
@@ -409,6 +416,8 @@ class Notifier:
             log.error("%s %s failed: %s", kind.value, channel.value, self._safe(exc))
             if isinstance(exc, smtplib.SMTPAuthenticationError):
                 log.error("SMTP login was rejected: check SENDER_EMAIL and SENDER_APP_PASSWORD")
+            if errors is not None:
+                errors.append(exc)
             ok = False
         else:
             log.info("%s %s sent: %s", kind.value, channel.value, subject)

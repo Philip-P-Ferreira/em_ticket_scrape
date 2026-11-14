@@ -43,6 +43,9 @@ def canary_report(store: Store, settings: Settings, now: datetime) -> CanaryRepo
         great_deals=stats.top_alerts,
         channel_failures=stats.channel_failures,
         browser_recycles=stats.browser_recycles,
+        resale_missing_polls=stats.resale_missing,
+        parse_warning_polls=stats.parse_warning_polls,
+        parse_degraded_polls=stats.parse_degraded_polls,
     )
 
 

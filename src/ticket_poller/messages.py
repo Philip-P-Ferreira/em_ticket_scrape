@@ -131,6 +131,9 @@ class CanaryReport:
     great_deals: int = 0
     channel_failures: Mapping[Channel, int] = field(default_factory=dict)
     browser_recycles: int = 0
+    resale_missing_polls: int = 0
+    parse_warning_polls: int = 0
+    parse_degraded_polls: int = 0
 
     @property
     def total_polls(self) -> int:
@@ -406,9 +409,19 @@ def _degraded_reasons(report: CanaryReport, ctx: MessageContext) -> list[str]:
         failing_for = report.now - report.failing_since
         if failing_for >= ctx.failure_alert_after:
             reasons.append(f"failing for {format_duration(failing_for)}")
-    if report.outcomes.get(PollOutcome.PARTIAL, 0):
+    if report.resale_missing_polls:
         reasons.append("resale not captured")
+    if report.parse_warning_polls:
+        reasons.append(_parse_text(report))
     return reasons
+
+
+def _parse_text(report: CanaryReport) -> str:
+    """``parse warnings in 3 polls (1 degraded)``."""
+    text = f"parse warnings in {report.parse_warning_polls:,} polls"
+    if report.parse_degraded_polls:
+        text += f" ({report.parse_degraded_polls:,} degraded)"
+    return text
 
 
 def _price_line(
@@ -463,7 +476,7 @@ def canary(report: CanaryReport, ctx: MessageContext) -> Email:
             streak += f" since {_time_or_date(report.failing_since, report.now, ctx.tz)}"
     wanted = ctx.rules.wanted_quantities
     failures = ", ".join(f"{c.value} {report.channel_failures.get(c, 0)}" for c in Channel)
-    lines = (
+    lines: tuple[str, ...] = (
         f"Polls (24 h): {report.total_polls:,} · {counts} · last success {last} · streak: {streak}",
         _price_line("Cheapest primary", report.primary_now, report.primary_low, wanted),
         _price_line("Cheapest resale ", report.resale_now, report.resale_low, wanted),
@@ -475,6 +488,8 @@ def canary(report: CanaryReport, ctx: MessageContext) -> Email:
         f"Browser recycles: {report.browser_recycles:,} · Version {__version__} "
         f"· Auto-stop {local_time(ctx.stop_after, ctx.tz)}",
     )
+    if report.parse_warning_polls:
+        lines += (f"Parser: {_parse_text(report)} — see journalctl -p warning",)
     return Email(f"ticket-poller daily canary — {status}", "\n".join(lines) + "\n")
 
 
@@ -615,6 +630,27 @@ def finished(*, ctx: MessageContext) -> Notice:
         3,
         ("checkered_flag",),
     )
+
+
+def email_failing(*, failures: int, auth_rejected: bool) -> Push:
+    """Ops push, once per episode: admin emails (and the canary) are not getting through."""
+    cause = (
+        "The SMTP login was rejected: check SENDER_EMAIL and SENDER_APP_PASSWORD."
+        if auth_rejected
+        else f"{failures} email send(s) in a row failed; see journalctl --user -u ticket-poller."
+    )
+    message = (
+        f"{cause} Alert pushes still work; the daily canary and admin emails do not. "
+        "You get this once until an email is delivered again."
+    )
+    return Push("ticket-poller: email delivery failing", message, 4, ("warning",))
+
+
+def service_failed(*, unit: str | None = None) -> Push:
+    """Ops push from ``notify-failure`` (systemd ``OnFailure=``); needs no state database."""
+    title = "Ticket poller service FAILED — check journalctl --user -u ticket-poller"
+    message = f"systemd unit {unit} entered the failed state." if unit else title
+    return Push(title, message, 5, ("rotating_light",))
 
 
 def sample_matches(rules: RuleConfig) -> list[Match]:

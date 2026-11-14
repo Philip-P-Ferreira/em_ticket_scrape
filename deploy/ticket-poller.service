@@ -14,6 +14,9 @@ After=graphical-session.target
 AssertEnvironment=DISPLAY
 StartLimitIntervalSec=1h
 StartLimitBurst=20
+# When the unit really fails (exit 78, or the start limit is hit), push an ops alert.
+# RestartMode=direct below keeps ordinary auto-restarts from triggering it.
+OnFailure=ticket-poller-failure.service
 
 [Service]
 Type=exec
@@ -36,11 +39,13 @@ TimeoutStopSec=45
 Environment=PYTHONUNBUFFERED=1
 UMask=0077
 
-# Exit codes: 0 = event over / signal (no restart), 1 = crash (restart),
-# 75 = instance lock held (restart after RestartSec), 78 = bad config or .env perms.
+# Exit codes: 0 = event over / signal (no restart), 1 = crash or watchdog (restart),
+# 75 = instance lock held (restart after RestartSec), 78 = bad config, .env perms or an
+# unreadable/corrupt state database (no restart: it would fail the same way).
 Restart=on-failure
 RestartSec=60
 RestartPreventExitStatus=78
+RestartMode=direct
 
 # stdout/stderr go to the journal: journalctl --user -u ticket-poller
 SyslogIdentifier=ticket-poller

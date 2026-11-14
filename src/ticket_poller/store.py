@@ -24,6 +24,7 @@ from types import TracebackType
 from typing import Any, Final, NamedTuple, Self
 
 from ticket_poller.models import (
+    SUPPORTED_QUANTITIES,
     Channel,
     InventoryType,
     Listing,
@@ -36,7 +37,7 @@ from ticket_poller.models import (
 )
 
 BUSY_TIMEOUT_MS: Final = 5000
-SNAPSHOT_QUANTITIES: Final = (2, 3)
+SNAPSHOT_QUANTITIES: Final = tuple(sorted(SUPPORTED_QUANTITIES))
 """Quantities with per-quantity cheapest-price columns in ``polls``."""
 
 _SUCCESS: Final = (PollOutcome.OK.value, PollOutcome.PARTIAL.value)
@@ -89,6 +90,10 @@ MIGRATIONS: tuple[tuple[str, ...], ...] = (
             ok INTEGER NOT NULL,
             subject TEXT NOT NULL)""",
         "CREATE TABLE kv (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
+    ),
+    (  # v2: parser health per poll
+        "ALTER TABLE polls ADD COLUMN parse_warnings INTEGER",
+        "ALTER TABLE polls ADD COLUMN parse_degraded INTEGER NOT NULL DEFAULT 0",
     ),
 )
 """Schema migrations; entry ``i`` upgrades ``user_version`` i to i + 1."""
@@ -162,6 +167,10 @@ class PollRecord:
     resale_labels: Mapping[int, str] = field(default_factory=dict)
     browser_recycled: bool = False
     """The browser was restarted during this poll."""
+    parse_warnings: int | None = None
+    """How many parser warnings the poll's inventory had (None if nothing was parsed)."""
+    parse_degraded: bool = False
+    """The parser dropped data it should have read (malformed or unparsable quickpicks)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -192,6 +201,12 @@ class PollStats:
     """Failed alert sends per channel in the window."""
     browser_recycles: int
     """Polls in the window during which the browser was restarted."""
+    resale_missing: int = 0
+    """Successful polls in the window whose resale capture was MISSING."""
+    parse_warning_polls: int = 0
+    """Polls in the window with at least one parser warning."""
+    parse_degraded_polls: int = 0
+    """Polls in the window whose parse was degraded."""
 
     @property
     def total(self) -> int:
@@ -227,6 +242,8 @@ class RuntimeState:
     resale_eligible_notice_sent: bool = False
     resale_missing_streak: int = 0
     resale_missing_notice_sent: bool = False
+    consecutive_email_failures: int = 0
+    email_failing_notice_sent: bool = False
 
     def record_failure(self, outcome: PollOutcome, now: datetime) -> Self:
         if outcome not in (PollOutcome.ERROR, PollOutcome.BLOCKED):
@@ -262,6 +279,12 @@ class RuntimeState:
     def record_recovery_notice(self, delivered: bool) -> Self:
         return replace(self, recovery_pending=False) if delivered else self
 
+    def record_email(self, ok: bool) -> Self:
+        """A delivered email ends the "email failing" episode; a failed one extends it."""
+        if ok:
+            return replace(self, consecutive_email_failures=0, email_failing_notice_sent=False)
+        return replace(self, consecutive_email_failures=self.consecutive_email_failures + 1)
+
     def record_canary(self, local_date: date, email_ok: bool) -> Self:
         """``last_canary_date`` moves only when the canary email was accepted."""
         return replace(self, last_canary_date=local_date) if email_ok else self
@@ -288,6 +311,7 @@ def _decode_state_value(name: str, text: str) -> Any:
 
 class _StoredListing(NamedTuple):
     key: str
+    inventory_type: InventoryType
     places: frozenset[str]
     last_seen_at: datetime
 
@@ -355,8 +379,8 @@ class Store:
         most one listing per poll.
 
         A row is re-armed once it has been gone for ``rearm_after``: measured from the first
-        OK/PARTIAL poll after it was last seen, so BLOCKED/ERROR outages don't count as
-        absence. ``rearm_after`` of zero disables re-arming.
+        poll after it was last seen that could have seen it (see ``_gone_at``), so outages
+        don't count as absence. ``rearm_after`` of zero disables re-arming.
         """
         found: dict[str, _StoredListing] = {}
         for listing in listings:
@@ -444,22 +468,31 @@ class Store:
         return Resolved(identity=identity, key=row.key, rearmed=rearmed)
 
     def _gone_at(self, row: _StoredListing) -> datetime | None:
-        """The first successful poll after ``row`` was last seen, i.e. one without it."""
-        found = self._conn.execute(
-            "SELECT MIN(started_at) FROM polls WHERE outcome IN (?, ?) AND started_at > ?",
-            (*_SUCCESS, _ts(row.last_seen_at)),
-        ).fetchone()
+        """The first poll after ``row`` was last seen that would have seen it, i.e. true absence.
+
+        That is a successful poll whose parse was not degraded; for a resale row it must also
+        have captured resale (a PARTIAL poll with resale MISSING says nothing about resale).
+        """
+        sql = """SELECT MIN(started_at) FROM polls
+                 WHERE outcome IN (?, ?) AND started_at > ? AND NOT parse_degraded"""
+        params: list[object] = [*_SUCCESS, _ts(row.last_seen_at)]
+        if row.inventory_type is InventoryType.RESALE:
+            sql += " AND resale_capture = ?"
+            params.append(ResaleCapture.CAPTURED.value)
+        found = self._conn.execute(sql, params).fetchone()
         return _optional_ts(found[0])
 
     def _listing_by_key(self, key: str) -> _StoredListing | None:
         row = self._conn.execute(
-            "SELECT dedup_key, places, last_seen_at FROM listings WHERE dedup_key = ?", (key,)
+            "SELECT dedup_key, inventory_type, places, last_seen_at FROM listings"
+            " WHERE dedup_key = ?",
+            (key,),
         ).fetchone()
         return None if row is None else _stored_listing(row)
 
     def _overlapping_listing(self, listing: Listing, exclude: set[str]) -> _StoredListing | None:
         rows = self._conn.execute(
-            """SELECT dedup_key, places, last_seen_at FROM listings
+            """SELECT dedup_key, inventory_type, places, last_seen_at FROM listings
                WHERE offer_id = ? AND inventory_type = ?
                ORDER BY last_seen_at DESC, dedup_key""",
             (listing.offer_id, InventoryType.PRIMARY.value),
@@ -512,6 +545,8 @@ class Store:
             "matches": record.matches,
             "new_matches": record.new_matches,
             "browser_recycled": record.browser_recycled,
+            "parse_warnings": record.parse_warnings,
+            "parse_degraded": record.parse_degraded,
             **_snapshot_columns(record.snapshot),
             **_label_columns(InventoryType.PRIMARY, record.primary_labels),
             **_label_columns(InventoryType.RESALE, record.resale_labels),
@@ -574,6 +609,18 @@ class Store:
             channel_failures=self._alert_failures(start),
             browser_recycles=self._scalar(
                 "SELECT COUNT(*) FROM polls WHERE started_at >= ? AND browser_recycled", (start,)
+            ),
+            resale_missing=self._scalar(
+                """SELECT COUNT(*) FROM polls
+                   WHERE started_at >= ? AND outcome IN (?, ?) AND resale_capture = ?""",
+                (start, *_SUCCESS, ResaleCapture.MISSING.value),
+            ),
+            parse_warning_polls=self._scalar(
+                "SELECT COUNT(*) FROM polls WHERE started_at >= ? AND parse_warnings > 0",
+                (start,),
+            ),
+            parse_degraded_polls=self._scalar(
+                "SELECT COUNT(*) FROM polls WHERE started_at >= ? AND parse_degraded", (start,)
             ),
         )
 
@@ -746,8 +793,10 @@ def _user_version(conn: sqlite3.Connection) -> int:
 
 
 def _stored_listing(row: sqlite3.Row) -> _StoredListing:
-    key, places, last_seen_at = row
-    return _StoredListing(key, frozenset(json.loads(places)), _from_ts(last_seen_at))
+    key, inventory_type, places, last_seen_at = row
+    return _StoredListing(
+        key, InventoryType(inventory_type), frozenset(json.loads(places)), _from_ts(last_seen_at)
+    )
 
 
 def _summary(listing: Listing) -> str:
@@ -800,6 +849,8 @@ def _poll_record(data: sqlite3.Row) -> PollRecord:
         primary_labels=_labels(data, InventoryType.PRIMARY),
         resale_labels=_labels(data, InventoryType.RESALE),
         browser_recycled=bool(data["browser_recycled"]),
+        parse_warnings=data["parse_warnings"],
+        parse_degraded=bool(data["parse_degraded"]),
     )
 
 

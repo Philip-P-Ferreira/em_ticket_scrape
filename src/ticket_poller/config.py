@@ -156,6 +156,8 @@ class Settings(BaseSettings):
     healthchecks_ping_url: SecretStr | None = None
 
     log_level: LogLevel = "INFO"
+    # A poll, notice or browser close busy longer than this exits the process for a restart.
+    watchdog_timeout_sec: int = Field(900, ge=120)
 
     # --- field validators -------------------------------------------------------------------
 

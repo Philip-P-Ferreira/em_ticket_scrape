@@ -1,16 +1,17 @@
 #!/usr/bin/env bash
-# Install (or update) the ticket-poller systemd user unit. Idempotent; safe to re-run.
-# It syncs the locked runtime deps, installs the unit and reloads systemd, but never
-# enables, starts or restarts the service.
+# Install (or update) the ticket-poller systemd user units: the service and its
+# OnFailure= push unit. Idempotent; safe to re-run. It syncs the locked runtime deps,
+# installs the units and reloads systemd, but never enables, starts or restarts anything.
 #
 #   deploy/install.sh              install / update
-#   deploy/install.sh --uninstall  disable + stop the service and remove the unit
+#   deploy/install.sh --uninstall  disable + stop the service and remove the units
 set -euo pipefail
 
 UNIT=ticket-poller.service
+FAILURE_UNIT=ticket-poller-failure.service   # started by OnFailure= in $UNIT
+UNITS=("$UNIT" "$FAILURE_UNIT")
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 UNIT_DIR=${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user
-DEST=$UNIT_DIR/$UNIT
 DEFAULT_ROOT='%h/repos/em_ticket_scrape'   # the path written in the template
 
 die() { echo "error: $*" >&2; exit 1; }
@@ -19,10 +20,12 @@ die() { echo "error: $*" >&2; exit 1; }
 
 if [[ ${1:-} == --uninstall ]]; then
     systemctl --user disable --now "$UNIT" 2>/dev/null || true
-    rm -f -- "$DEST"
+    systemctl --user stop "$FAILURE_UNIT" 2>/dev/null || true
+    for unit in "${UNITS[@]}"; do rm -f -- "$UNIT_DIR/$unit"; done
     systemctl --user daemon-reload
-    systemctl --user reset-failed "$UNIT" 2>/dev/null || true
-    echo "Removed $DEST. State and the browser profile in ~/.local/share/em_ticket_scrape are kept."
+    systemctl --user reset-failed "${UNITS[@]}" 2>/dev/null || true
+    echo "Removed ${UNITS[*]} from $UNIT_DIR."
+    echo "State and the browser profile in ~/.local/share/em_ticket_scrape are kept."
     exit 0
 fi
 [[ $# -eq 0 ]] || die "usage: $0 [--uninstall]"
@@ -41,21 +44,25 @@ echo "==> Syncing runtime dependencies from uv.lock"
 (cd -- "$ROOT" && "$UV" sync --frozen --no-dev --inexact --quiet)
 [[ -x $ROOT/.venv/bin/ticket-poller ]] || die ".venv/bin/ticket-poller missing after uv sync"
 
-echo "==> Installing $DEST"
-staging=$UNIT_DIR/.ticket-poller-staging   # verify needs a real unit file name
+echo "==> Installing ${UNITS[*]} into $UNIT_DIR"
+staging=$UNIT_DIR/.ticket-poller-staging   # verify needs real unit file names
 mkdir -p -- "$staging"
-tmp=$staging/$UNIT
 trap 'rm -rf -- "$staging"' EXIT
-if [[ $ROOT == "$HOME/repos/em_ticket_scrape" ]]; then
-    cp -- "$ROOT/deploy/$UNIT" "$tmp"
-else
-    sed "s|$DEFAULT_ROOT|$ROOT|g" "$ROOT/deploy/$UNIT" >"$tmp"
-fi
-chmod 0644 -- "$tmp"
+staged=()
+for unit in "${UNITS[@]}"; do
+    tmp=$staging/$unit
+    if [[ $ROOT == "$HOME/repos/em_ticket_scrape" ]]; then
+        cp -- "$ROOT/deploy/$unit" "$tmp"
+    else
+        sed "s|$DEFAULT_ROOT|$ROOT|g" "$ROOT/deploy/$unit" >"$tmp"
+    fi
+    chmod 0644 -- "$tmp"
+    staged+=("$tmp")
+done
 # verify exits 0 on ignored keys/values, so any output counts as a failure.
-problems=$(systemd-analyze --user verify "$tmp" 2>&1) || true
+problems=$(systemd-analyze --user verify "${staged[@]}" 2>&1) || true
 [[ -z $problems ]] || { echo "$problems" >&2; die "unit failed verification"; }
-mv -f -- "$tmp" "$DEST"
+for unit in "${UNITS[@]}"; do mv -f -- "$staging/$unit" "$UNIT_DIR/$unit"; done
 systemctl --user daemon-reload
 
 if [[ ! -f $ROOT/.env ]]; then
@@ -70,7 +77,9 @@ Installed. The service has NOT been enabled or started. Next steps:
   cd $ROOT
   uv run ticket-poller test-notify     # email + push reach the admin
   uv run ticket-poller poll-once       # dry run; compare prices with the browser
+  uv run ticket-poller notify-failure  # the ops push $FAILURE_UNIT sends on failure
   systemctl --user enable --now $UNIT
   journalctl --user -u ticket-poller -f
-Re-run this script after editing deploy/$UNIT. Uninstall: $0 --uninstall
+$FAILURE_UNIT is not enabled: $UNIT starts it via OnFailure=.
+Re-run this script after editing deploy/*.service. Uninstall: $0 --uninstall
 EOF

@@ -33,7 +33,7 @@ from ticket_poller.models import (
     PriceSnapshot,
     ResaleCapture,
 )
-from ticket_poller.notify import AuditHook, Notifier
+from ticket_poller.notify import AuditHook, Delivery, Notifier
 from ticket_poller.parsing import ParseError, parse_inventory, resale_capture
 from ticket_poller.rules import candidates, compute_baseline, evaluate, price_snapshot
 from ticket_poller.schedule import (
@@ -49,6 +49,7 @@ from ticket_poller.schedule import (
 )
 from ticket_poller.status import canary_report, current_baseline
 from ticket_poller.store import PollRecord, Resolved, RuntimeState, Store, key_matches
+from ticket_poller.watchdog import NoWatchdog, Watchdog
 
 log = logging.getLogger(__name__)
 
@@ -56,6 +57,19 @@ RESALE_MISSING_POLLS: Final = 3
 """Consecutive MISSING polls before the ``resale_missing`` notice (§7)."""
 
 SUCCESS: Final = frozenset({PollOutcome.OK, PollOutcome.PARTIAL})
+
+MAX_WAIT_SECONDS: Final = 60.0
+"""Longest single ``Event.wait`` slice: a wall-clock step is noticed within a minute."""
+
+CLOCK_STEP_TOLERANCE: Final = timedelta(seconds=5)
+
+
+EMAIL_FAILURES_BEFORE_PUSH: Final = 3
+"""Consecutive failed emails (any kind) before the one-time "email failing" ops push; a
+failed canary or a rejected SMTP login sends it at once."""
+
+MAX_LOGGED_PARSE_WARNINGS: Final = 3
+"""Parser warnings logged one per line each poll; the rest are counted in one more line."""
 
 
 class ExitReason(StrEnum):
@@ -135,6 +149,7 @@ class Poller:
         clock: Clock,
         stop: threading.Event,
         rng: random.Random | None = None,
+        watchdog: Watchdog | None = None,
     ) -> None:
         self._settings = settings
         self._fetcher = fetcher
@@ -144,6 +159,7 @@ class Poller:
         self._clock = clock
         self._stop = stop
         self._rng = rng if rng is not None else random.Random()
+        self._watchdog = watchdog if watchdog is not None else NoWatchdog()
         self._rules = settings.rule_config()
         self._ctx = messages.MessageContext.from_settings(settings)
         self._timing = PollTiming.from_settings(settings)
@@ -159,16 +175,20 @@ class Poller:
         while not self._stop.is_set():
             now = self._clock.now()
             if event_over(now, self._settings.stop_after):
+                self._watchdog.busy("finished notice")
                 return self._finish()
             if now >= self._next_poll:
+                self._watchdog.busy("poll")
                 report = self.poll_once()
                 if report is None:
                     break
                 self._next_poll = self._schedule_after(report)
                 now = self._clock.now()
+            self._watchdog.busy("notices")
             self._send_due_notices(now)
             wake = self._next_wake(now)
-            if self._clock.wait((wake - self._clock.now()).total_seconds()):
+            self._watchdog.idle()
+            if self._sleep_until(wake):
                 break
         log.info("stop requested; shutting down")
         return ExitReason.SIGNAL
@@ -185,6 +205,32 @@ class Poller:
         if resume > now:
             log.info("resuming the failure backoff: first poll at %s", resume.isoformat())
         return max(now, resume)
+
+    def _sleep_until(self, wake: datetime) -> bool:
+        """Wait until ``wake`` in ≤ ``MAX_WAIT_SECONDS`` slices; True if stop was requested.
+
+        Slices are monotonic, so the wait never outlasts its planned length: after a forward
+        wall-clock step it ends early, after a backward step on time, and the next poll is
+        moved back by the step (canary hours stay on the wall clock).
+        """
+        planned = (wake - self._clock.now()).total_seconds()
+        waited = 0.0
+        while True:
+            left = (wake - self._clock.now()).total_seconds()
+            step = min(MAX_WAIT_SECONDS, planned - waited, left)
+            if self._clock.wait(step):
+                return True
+            waited += max(0.0, step)
+            if waited >= planned or self._clock.now() >= wake:
+                break
+        behind = wake - self._clock.now()
+        if behind > CLOCK_STEP_TOLERANCE and self._next_poll is not None:
+            log.warning(
+                "wall clock stepped back %s; next poll moved up",
+                _seconds_text(behind.total_seconds()),
+            )
+            self._next_poll -= behind
+        return False
 
     def _schedule_after(self, report: PollReport) -> datetime:
         streak = self._streak(self._db.get_state(), report.outcome)
@@ -256,9 +302,7 @@ class Poller:
         if not canary_due(now, self._db.get_state().last_canary_date, tz, hour):
             return
         email = messages.canary(canary_report(self._db, self._settings, now), self._ctx)
-        delivery = self._notifier.send(
-            NoticeKind.CANARY, to=[self._settings.admin_email], email=email
-        )
+        delivery = self._send(NoticeKind.CANARY, to=[self._settings.admin_email], email=email)
         today = now.astimezone(self._settings.tz).date()
         self._db.save_state(
             self._db.get_state().record_canary(today, email_ok=delivery.ok(Channel.EMAIL))
@@ -278,10 +322,44 @@ class Poller:
 
     def _notify_admin(self, notice: messages.Notice) -> bool:
         """Admin email + ops push; the notice counts as done once any channel delivers."""
-        delivery = self._notifier.send(
+        delivery = self._send(
             notice.kind, to=[self._settings.admin_email], email=notice.email, push=notice.push
         )
         return delivery.any_ok
+
+    def _send(
+        self,
+        kind: NoticeKind,
+        *,
+        to: Sequence[str],
+        email: messages.Email | None = None,
+        push: messages.Push | None = None,
+    ) -> Delivery:
+        """``Notifier.send``, then track the shared "email failing" episode."""
+        delivery = self._notifier.send(kind, to=to, email=email, push=push)
+        if delivery.email is not None:
+            self._track_email(kind, delivery)
+        return delivery
+
+    def _track_email(self, kind: NoticeKind, delivery: Delivery) -> None:
+        """One ops push per episode of failing email; a delivered email ends the episode."""
+        state = self._db.get_state().record_email(delivery.ok(Channel.EMAIL))
+        failing = state.consecutive_email_failures
+        if (
+            failing
+            and not state.email_failing_notice_sent
+            and (
+                kind is NoticeKind.CANARY
+                or delivery.email_auth_failed
+                or failing >= EMAIL_FAILURES_BEFORE_PUSH
+            )
+        ):
+            push = messages.email_failing(
+                failures=failing, auth_rejected=delivery.email_auth_failed
+            )
+            pushed = self._notifier.send(NoticeKind.EMAIL_FAILING, to=(), push=push)
+            state = replace(state, email_failing_notice_sent=pushed.ok(Channel.PUSH))
+        self._db.save_state(state)
 
     # --- one poll (§8 poll_once) ---------------------------------------------------------------
 
@@ -306,6 +384,7 @@ class Poller:
             report = self._crash_report(started, exc)
             self._record(report)
         if not report.succeeded:
+            self._watchdog.busy("browser close")
             self._fetcher.close()  # relaunch the browser on the next poll (§9.1)
             return report
         return self._act_on(report)
@@ -326,11 +405,17 @@ class Poller:
             detail = f"parse: {exc}"
             self._dump(detail, result.responses)
             return self._report(started, result, PollOutcome.ERROR, detail, dry_run=dry_run)
+        _log_parse_warnings(inventory)
         findings = self._findings(inventory, result.resale_eligible, started)
-        outcome = (
-            PollOutcome.PARTIAL if findings.capture is ResaleCapture.MISSING else PollOutcome.OK
-        )
-        return self._report(started, result, outcome, result.detail, findings, dry_run=dry_run)
+        degraded = bool(inventory.degraded)
+        if degraded or findings.capture is ResaleCapture.MISSING:
+            outcome = PollOutcome.PARTIAL
+        else:
+            outcome = PollOutcome.OK
+        detail = result.detail
+        if degraded:
+            detail = "; ".join(filter(None, (detail, _degraded_detail(inventory))))
+        return self._report(started, result, outcome, detail, findings, dry_run=dry_run)
 
     def _report(
         self,
@@ -444,13 +529,13 @@ class Poller:
         to = self._settings.alert_recipients
         if channel is Channel.PUSH:
             push = messages.alert_push(matches, self._ctx)
-            return self._notifier.send(NoticeKind.ALERT, to=to, push=push).ok(channel)
+            return self._send(NoticeKind.ALERT, to=to, push=push).ok(channel)
         delivered = self._db.delivered_keys([status.key for status in owed], channel)
         upgraded = [status.match.listing.identity for status in owed if status.key in delivered]
         email = messages.alert_email(
             matches, baseline, self._ctx, self._clock.now(), upgraded=upgraded
         )
-        return self._notifier.send(NoticeKind.ALERT, to=to, email=email).ok(channel)
+        return self._send(NoticeKind.ALERT, to=to, email=email).ok(channel)
 
     def _send_resale_notices(self, report: PollReport) -> None:
         """``resale_eligible`` once ever; ``resale_missing`` once per MISSING episode (§7)."""
@@ -461,13 +546,13 @@ class Poller:
         if report.fetch.resale_eligible and not state.resale_eligible_notice_sent:
             notice = messages.resale_eligible(capture=findings.capture, ctx=self._ctx)
             if self._notify_admin(notice):
-                self._db.save_state(replace(state, resale_eligible_notice_sent=True))
+                self._db.save_state(replace(self._db.get_state(), resale_eligible_notice_sent=True))
         state = self._db.get_state()
         streak = state.resale_missing_streak
         if streak >= RESALE_MISSING_POLLS and not state.resale_missing_notice_sent:
             notice = messages.resale_missing(polls=streak, ctx=self._ctx)
             if self._notify_admin(notice):
-                self._db.save_state(replace(state, resale_missing_notice_sent=True))
+                self._db.save_state(replace(self._db.get_state(), resale_missing_notice_sent=True))
 
     def _dump(self, reason: str, responses: Sequence[CapturedResponse]) -> None:
         settings = self._settings
@@ -485,6 +570,24 @@ class Poller:
         if self._store is None:
             raise RuntimeError("a live poll needs the state database")
         return self._store
+
+
+def _log_parse_warnings(inventory: Inventory) -> None:
+    """At most ``MAX_LOGGED_PARSE_WARNINGS`` + 1 WARNING lines per poll."""
+    degraded = set(inventory.degraded)
+    warnings = sorted(inventory.warnings, key=lambda warning: warning not in degraded)
+    for warning in warnings[:MAX_LOGGED_PARSE_WARNINGS]:
+        label = " (degraded)" if warning in degraded else ""
+        log.warning("parse warning%s: %s", label, warning)
+    if (more := len(warnings) - MAX_LOGGED_PARSE_WARNINGS) > 0:
+        log.warning(
+            "%d more parse warnings this poll (%d degraded in total)", more, len(inventory.degraded)
+        )
+
+
+def _degraded_detail(inventory: Inventory) -> str:
+    first, more = inventory.degraded[0], len(inventory.degraded) - 1
+    return f"parse degraded: {first}" + (f" (+{more} more)" if more else "")
 
 
 def _log_capture(capture: ResaleCapture, eligible: bool | None) -> None:
@@ -534,6 +637,8 @@ def _poll_record(report: PollReport, wanted: frozenset[int]) -> PollRecord:
         new_matches=len(findings.new_matches),
         primary_labels=_cheapest_labels(inventory.primary, wanted),
         resale_labels=_cheapest_labels(inventory.resale, wanted),
+        parse_warnings=len(inventory.warnings),
+        parse_degraded=bool(inventory.degraded),
     )
 
 
@@ -568,10 +673,11 @@ def poll_summary(report: PollReport, ctx: messages.MessageContext) -> str:
     )
     new = findings.new_matches
     top = f" top={min(status.match.priority for status in new).name}" if new else ""
+    warnings = f" parse_warnings={len(inventory.warnings)}" if inventory.warnings else ""
     return (
         f"{head}: primary={len(inventory.primary)} resale={len(inventory.resale)}"
         f" resale_capture={findings.capture.value} {prices} baseline={baseline_text}"
-        f" matches={len(findings.matches)} new={len(new)}{top}"
+        f" matches={len(findings.matches)} new={len(new)}{top}{warnings}"
     )
 
 

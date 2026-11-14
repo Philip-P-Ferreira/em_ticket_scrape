@@ -33,6 +33,7 @@ uv run ticket-poller test-notify     # email + push to the admin; --no-email / -
 uv run ticket-poller poll-once       # dry run: prints listings and would-be alerts, sends/writes nothing
 uv run ticket-poller status          # polling, outage, baseline and delivery state
 uv run ticket-poller canary-now --print   # render today's canary (omit --print to send it)
+uv run ticket-poller notify-failure  # the ops push the failure unit sends (push only, no DB)
 ```
 
 `poll-once --save DIR` keeps the captured JSON; `poll-once --notify` acts exactly like one
@@ -42,17 +43,27 @@ lock, so stop the service before using `poll-once`.
 ## Install and run the service
 
 ```sh
-deploy/install.sh                          # uv sync --frozen --no-dev, install unit, daemon-reload
+deploy/install.sh                          # uv sync --frozen --no-dev, install units, daemon-reload
 systemctl --user enable --now ticket-poller
 systemctl --user status ticket-poller
 journalctl --user -u ticket-poller -f      # one INFO line per poll; secrets are redacted
 journalctl --user -u ticket-poller --since today -p warning
 systemctl --user disable --now ticket-poller   # stop for good
-deploy/install.sh --uninstall              # disable, stop and remove the unit (state is kept)
+deploy/install.sh --uninstall              # disable, stop and remove the units (state is kept)
 ```
 
 `install.sh` is idempotent and never enables or starts anything; re-run it after editing
-`deploy/ticket-poller.service`. The unit:
+`deploy/*.service`. It installs two units:
+
+- `ticket-poller.service`, the poller (below).
+- `ticket-poller-failure.service`, a oneshot that runs `ticket-poller notify-failure
+  ticket-poller.service`, pushing "Ticket poller service FAILED — check journalctl --user
+  -u ticket-poller" to the ops topic (`NTFY_OPS_TOPIC`, else `NTFY_TOPIC`). It needs only
+  `.env`, not the state database or email. The poller starts it via `OnFailure=` when it
+  ends up failed (exit 78, or too many restarts); `RestartMode=direct` keeps ordinary
+  auto-restarts from triggering it. Never enable it yourself.
+
+The poller unit:
 
 - is a **user** service tied to the desktop session (`PartOf`/`WantedBy=graphical-session.target`):
   it starts at login and stops at logout. KDE exports `DISPLAY`, `WAYLAND_DISPLAY`,
@@ -67,11 +78,19 @@ deploy/install.sh --uninstall              # disable, stop and remove the unit (
   reads `.env` itself from the repo directory.
 - stops cleanly within `TimeoutStopSec=45`: `deploy/stop-poller.sh` sends SIGTERM to the
   poller (systemd-inhibit doesn't forward it) and waits while it closes Chromium.
+- has an in-process **hang watchdog**: if one poll, notification step or browser close takes
+  longer than `WATCHDOG_TIMEOUT_SEC` (default 900), the poller logs CRITICAL and exits 1,
+  and systemd restarts it. Sleeps and backoff waits never count.
 
-Exit codes: **0** event over or stopped (not restarted) · **1** crash (restarted after 60 s)
-· **75** another poller holds the lock (retried after 60 s) · **78** bad config or unsafe
-`.env` permissions (not restarted; fix and `systemctl --user restart ticket-poller`).
-More than 20 restarts in an hour leaves the unit failed.
+Exit codes: **0** event over or stopped (not restarted) · **1** crash or watchdog (restarted
+after 60 s) · **75** another poller holds the lock (retried after 60 s) · **78** bad config,
+unsafe `.env` permissions, or an unreadable/corrupt state database (not restarted; fix and
+`systemctl --user restart ticket-poller`). More than 20 restarts in an hour leaves the unit
+failed. A failed unit sends the ops push above.
+
+If email delivery fails (a failed canary, Gmail rejecting the App Password, or 3 failed
+emails in a row), the poller sends one ops push saying email is failing. It sends no more
+until an email gets through again; this state survives restarts.
 
 ## Adding Emery
 
@@ -104,6 +123,12 @@ Never delete the profile's `Singleton*` files.
   non-KDE desktop add `systemctl --user import-environment DISPLAY WAYLAND_DISPLAY XAUTHORITY`
   to the session's autostart.
 - **exit 78**: read the error in `journalctl --user -u ticket-poller`; usually `chmod 600 .env`.
+  "state database unusable" means `~/.local/share/em_ticket_scrape/state.sqlite3` is
+  corrupt or unreadable: move it aside (alert history and the price baseline restart).
+- **"email delivery failing" push**: check `SENDER_APP_PASSWORD` (Gmail revokes App
+  Passwords when the account password changes), then `uv run ticket-poller test-notify`.
+- **"canary DEGRADED … parse warnings"**: Ticketmaster's JSON changed shape; the
+  `parse warning` lines in the journal say which part.
 - **exit 75 / "another poller is running"**: stop the service before `poll-once`.
 - **ntfy push on iOS only shows after opening the app**: subscribe on the default
   `ntfy.sh` server (not a custom server URL); if it still only updates on refresh,
@@ -119,5 +144,5 @@ uv run ruff check && uv run ruff format --check
 uv run mypy --strict src tests
 uv run pytest -q
 uv run pytest -q -m live   # needs a display and /usr/bin/chromium; no network
-systemd-analyze --user verify deploy/ticket-poller.service
+systemd-analyze --user verify deploy/ticket-poller.service deploy/ticket-poller-failure.service
 ```
