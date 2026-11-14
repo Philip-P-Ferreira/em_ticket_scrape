@@ -3,13 +3,14 @@
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 import httpx
 import pytest
 
 from tests.sample_env import APP_PASSWORD, NTFY_OPS_TOPIC, NTFY_TOKEN, NTFY_TOPIC, EnvFileFactory
-from ticket_poller import notify
+from ticket_poller import cli, notify
 from ticket_poller.cli import main
 from ticket_poller.config import Settings, load_settings
 from ticket_poller.messages import Email, Push
@@ -239,6 +240,47 @@ class TestNotifyFailure:
         assert push.message.splitlines()[-1] == "Config problem: the configuration is invalid."
         for secret in (APP_PASSWORD, NTFY_TOPIC, NTFY_OPS_TOPIC, NTFY_TOKEN):
             assert secret not in push.title + push.message
+
+    def test_invalid_utf8_env_file_still_pushes(
+        self,
+        make_env_file: EnvFileFactory,
+        fake_notifier: FakeNotifier,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        scratch = tmp_path / "scratch.env"
+        scratch.write_bytes(make_env_file().read_bytes() + b"EVENT_NAME=Caf\xe9\n")
+        scratch.chmod(0o600)
+        monkeypatch.setenv("ENV_FILE", str(scratch))
+
+        assert main(["status"]) == 78  # the service refuses it as a config error, not a crash
+        assert main(["notify-failure"]) == 0
+
+        ((_kind, _email, push, _to),) = fake_notifier.sent
+        assert push is not None
+        assert push.message.splitlines()[-1] == "Config problem: the configuration is invalid."
+
+    def test_unexpected_settings_error_is_reported_by_type_only(
+        self,
+        make_env_file: EnvFileFactory,
+        fake_notifier: FakeNotifier,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        make_env_file()
+
+        def explode() -> None:
+            raise RuntimeError(APP_PASSWORD)
+
+        monkeypatch.setattr(cli, "load_settings", explode)
+
+        assert main(["notify-failure"]) == 0
+
+        ((_kind, _email, push, _to),) = fake_notifier.sent
+        assert push is not None
+        assert push.message.splitlines()[-1] == (
+            "Config problem: the configuration is invalid (RuntimeError)."
+        )
+        assert APP_PASSWORD not in push.message
 
     def test_no_topic_exits_1_without_sending(
         self, make_env_file: EnvFileFactory, fake_notifier: FakeNotifier

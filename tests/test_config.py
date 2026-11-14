@@ -475,3 +475,39 @@ class TestReadOpsPushConfig:
         assert env_file_path() == Path(".env")
         monkeypatch.setenv("ENV_FILE", str(tmp_path / "x.env"))
         assert env_file_path() == tmp_path / "x.env"
+
+    def test_parses_like_settings(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("OPS_SUFFIX", "w6")
+        env = tmp_path / "ops.env"
+        env.write_text(
+            'NOTE="first line\nsecond line"\n'
+            "NTFY_SERVER=https://ntfy.example.com\t# tab comment\n"
+            "export NTFY_OPS_TOPIC=nk-ops-k2m8p4${OPS_SUFFIX}\n",
+            encoding="utf-8",
+        )
+
+        config = read_ops_push_config(env)
+
+        assert config.server == "https://ntfy.example.com"
+        assert config.topic is not None
+        assert config.topic.get_secret_value() == NTFY_OPS_TOPIC
+
+    def test_an_invalid_byte_does_not_hide_the_ntfy_keys(self, tmp_path: Path) -> None:
+        env = tmp_path / "ops.env"
+        env.write_bytes(b"EVENT_NAME=Caf\xe9\n" + f"NTFY_TOPIC={NTFY_TOPIC}\n".encode())
+
+        config = read_ops_push_config(env)
+
+        assert config.topic is not None
+        assert config.topic.get_secret_value() == NTFY_TOPIC
+
+
+def test_invalid_utf8_env_file_is_a_config_error(
+    make_env_file: EnvFileFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = make_env_file()
+    path.write_bytes(path.read_bytes() + b"EVENT_NAME=Caf\xe9\n")
+    monkeypatch.setenv("ENV_FILE", str(path))
+
+    with pytest.raises(ConfigError, match="not valid UTF-8"):
+        load_settings()

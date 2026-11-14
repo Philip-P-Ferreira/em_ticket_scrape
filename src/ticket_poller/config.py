@@ -9,6 +9,7 @@ it as given instead of using the default.
 which shows only non-sensitive values and reports secrets as ``set``/``unset``.
 """
 
+import io
 import logging
 import os
 import re
@@ -22,6 +23,7 @@ from typing import Annotated, Final, Literal, Self
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from dotenv import dotenv_values
 from pydantic import (
     AfterValidator,
     BeforeValidator,
@@ -395,6 +397,8 @@ def load_settings(env_file: Path | None = None) -> Settings:
         raise ConfigError(_format_validation_error(exc)) from None
     except OSError as exc:
         raise ConfigError(f"cannot read env file {path}: {exc.strerror}") from exc
+    except UnicodeDecodeError:
+        raise ConfigError(f"cannot read env file {path}: not valid UTF-8") from None
 
 
 def env_file_path() -> Path:
@@ -418,8 +422,8 @@ class OpsPushConfig:
 
 def read_ops_push_config(path: Path) -> OpsPushConfig:
     """Best effort, for ``notify-failure``: the ntfy settings from the environment, else from
-    ``path`` (minimal ``KEY=VALUE`` parsing, quotes stripped). Never raises: an unreadable
-    file, unsafe permissions or invalid other settings are ignored here."""
+    ``path`` (parsed by python-dotenv, like ``Settings``). Never raises: an unreadable
+    file, invalid UTF-8, unsafe permissions or invalid other settings are ignored here."""
     values = _read_env_file(path, OPS_PUSH_KEYS)
     environ = {key.upper(): value.strip() for key, value in os.environ.items()}
     values |= {key: environ[key] for key in OPS_PUSH_KEYS if environ.get(key)}
@@ -435,28 +439,25 @@ def read_ops_push_config(path: Path) -> OpsPushConfig:
 
 
 def _read_env_file(path: Path, keys: Iterable[str]) -> dict[str, str]:
+    """``keys`` from ``path``, parsed by python-dotenv exactly as ``Settings`` parses it.
+
+    Invalid UTF-8 falls back to a lenient decode, so one bad byte elsewhere in the file
+    doesn't hide these keys.
+    """
     try:
-        text = path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
+        try:
+            parsed = dotenv_values(path, encoding="utf-8")
+        except UnicodeDecodeError:
+            text = path.read_bytes().decode("utf-8", errors="replace")
+            parsed = dotenv_values(stream=io.StringIO(text))
+    except OSError:
         return {}
     wanted = set(keys)
-    values = {}
-    for raw in text.splitlines():
-        line = raw.strip().removeprefix("export ").lstrip()
-        key, sep, value = line.partition("=")
-        key = key.strip().upper()
-        if sep and key in wanted:
-            values[key] = _unquote(value.strip())
-    return values
-
-
-def _unquote(value: str) -> str:
-    """``"a b"`` → ``a b``; an unquoted value ends at an inline `` #`` comment."""
-    if value[:1] in ("'", '"'):
-        end = value.find(value[0], 1)
-        if end > 0:
-            return value[1:end]
-    return value.split(" #", 1)[0].strip()
+    return {
+        key.upper(): value.strip()
+        for key, value in parsed.items()
+        if key.upper() in wanted and value is not None
+    }
 
 
 def ensure_private_dir(path: Path) -> None:

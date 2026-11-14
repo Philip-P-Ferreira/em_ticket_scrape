@@ -230,6 +230,9 @@ def _config_problem(path: Path) -> str | None:
     except ConfigError as exc:
         log.warning("%s", exc)
         return "the configuration is invalid"
+    except Exception as exc:  # best effort: report the type only, never a value
+        log.warning("configuration check failed: %s", type(exc).__name__)
+        return f"the configuration is invalid ({type(exc).__name__})"
     return None
 
 
