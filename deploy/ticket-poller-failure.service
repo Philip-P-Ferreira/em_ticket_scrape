@@ -1,6 +1,7 @@
 # systemd user unit: pushes "service FAILED" to the ntfy ops topic (design §16).
-# Started by OnFailure= in ticket-poller.service; installed by deploy/install.sh, which
-# rewrites the repo paths below if the checkout is not at ~/repos/em_ticket_scrape.
+# Started by OnFailure= in ticket-poller.service; installed by deploy/install.sh (and, as is,
+# by deploy/nas/install.sh on the NAS), which rewrite the repo paths below if the checkout
+# is not at ~/repos/em_ticket_scrape.
 # Best effort: it reads only the ntfy settings (NTFY_SERVER, NTFY_OPS_TOPIC or NTFY_TOPIC,
 # NTFY_TOKEN) from the environment and .env, without validating the rest, and needs no state
 # database or email. So it still pushes when the service exited 78 on invalid config, unsafe

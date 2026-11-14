@@ -1,0 +1,73 @@
+# systemd user unit for the Ticketmaster poller on the UGREEN NAS (headless box, Xvfb).
+# Derived from deploy/ticket-poller.service. Installed by deploy/nas/install.sh into
+# ~/.config/systemd/user/; that script rewrites the repo paths below if the checkout is
+# not at ~/repos/em_ticket_scrape. Needs `loginctl enable-linger` to run without a login.
+
+[Unit]
+Description=Ticketmaster poller (Noah Kahan, 2027-04-27), NAS
+Documentation=file://%h/repos/em_ticket_scrape/README.md
+# Headed Chromium draws on the Xvfb display. Requires= also stops this unit when Xvfb is
+# stopped, and restarts it when Xvfb restarts (also after an Xvfb crash).
+Requires=ticket-poller-xvfb.service
+After=ticket-poller-xvfb.service
+StartLimitIntervalSec=1h
+StartLimitBurst=20
+# When the unit really fails (exit 78, or the start limit is hit), push an ops alert.
+# Ordinary auto-restarts don't trigger it (see Restart= below).
+OnFailure=ticket-poller-failure.service
+
+[Service]
+Type=exec
+WorkingDirectory=%h/repos/em_ticket_scrape
+# The app reads ./.env itself (with its owner/0600 check), so no EnvironmentFile=. On the
+# NAS, .env must set CHROMIUM_PATH, STATE_DIR and BROWSER_PROFILE_DIR (see README).
+# No systemd-inhibit (Access denied on UGOS; a NAS doesn't suspend) and so no ExecStop
+# helper: the poller is the main process and gets systemd's SIGTERM itself.
+ExecStart=%h/repos/em_ticket_scrape/.venv/bin/ticket-poller run
+# After a stop, SIGKILL anything left in the cgroup (e.g. an orphaned Chromium).
+KillMode=mixed
+TimeoutStopSec=45
+Environment=PYTHONUNBUFFERED=1
+Environment=DISPLAY=:99
+Environment=XAUTHORITY=%h/repos/em_ticket_scrape/.nas/xauthority
+# The real $HOME and /tmp are world-writable on UGOS, and Chromium writes its NSS database
+# (~/.local/share/pki) and Playwright its temp dirs there, so point both into the 0700
+# project. (.env paths must therefore be absolute, not ~/…). deploy/nas/run.sh sets the same.
+Environment=HOME=%h/repos/em_ticket_scrape/.nas/home
+Environment=TMPDIR=%h/repos/em_ticket_scrape/.nas/tmp
+UMask=0077
+
+# Exit codes: 0 = event over / signal (no restart), 1 = crash or watchdog (restart),
+# 75 = instance lock held (restart after RestartSec), 78 = bad config, .env perms or an
+# unreadable/corrupt state database (no restart: it would fail the same way).
+Restart=on-failure
+RestartSec=60
+RestartPreventExitStatus=78
+# No RestartMode=direct: UGOS has systemd 252, which doesn't know it (v254+) and fails the
+# verify in install.sh. 252 already behaves like "direct": auto-restarts skip the failed
+# state, so OnFailure= fires only on a real failure (tested on the NAS).
+
+# stdout/stderr go to the journal: journalctl --user -u ticket-poller
+SyslogIdentifier=ticket-poller
+
+# Background job: yield CPU/IO to UGOS and its services.
+Nice=5
+IOSchedulingClass=best-effort
+IOSchedulingPriority=6
+# Chromium peaks at ≈1.1 GB PSS on the event page; the box has 7.5 GiB shared with UGOS.
+# The memory controller is delegated to the user manager on the NAS, so these take effect.
+MemoryHigh=1.5G
+MemoryMax=2.5G
+
+# Hardening that Chromium tolerates (verified with the live tests in a transient unit).
+# Deliberately NOT set: MemoryDenyWriteExecute (V8 JIT), RestrictNamespaces (Chromium's
+# user-namespace sandbox), PrivateTmp (hides /tmp/.X11-unix), PrivateDevices,
+# ProtectHome/ProtectSystem/PrivateUsers (profile, state and repo live in $HOME).
+NoNewPrivileges=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=default.target

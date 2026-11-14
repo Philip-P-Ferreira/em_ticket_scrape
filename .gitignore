@@ -28,3 +28,7 @@ state/
 poller.lock
 debug/
 .probe/
+
+# NAS-local binaries (deploy/nas): uv, Python, Chromium, Xvfb
+.nas/
+.push-staging/

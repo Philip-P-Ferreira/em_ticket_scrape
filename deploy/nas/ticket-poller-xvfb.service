@@ -1,0 +1,36 @@
+# systemd user unit: the virtual X display :99 for the NAS poller's headed Chromium.
+# Installed by deploy/nas/install.sh into ~/.config/systemd/user/; that script rewrites the
+# repo paths below if the checkout is not at ~/repos/em_ticket_scrape. Xvfb is the copy
+# extracted into .nas/xvfb (no system Xvfb on UGOS); it uses the system xkbcomp/xkb-data.
+
+[Unit]
+Description=Xvfb :99 for ticket-poller
+Documentation=file://%h/repos/em_ticket_scrape/README.md
+# Never give up: ticket-poller.service requires this unit.
+StartLimitIntervalSec=0
+
+[Service]
+Type=exec
+# Clears a stale /tmp/.X99-lock of ours (after a crash or a reused PID) and writes a fresh
+# auth cookie, so only processes that can read the 0700 project dir can use the display.
+ExecStartPre=%h/repos/em_ticket_scrape/deploy/nas/xvfb-helper.sh prepare 99 %h/repos/em_ticket_scrape/.nas/xauthority
+ExecStart=%h/repos/em_ticket_scrape/.nas/xvfb/root/usr/bin/Xvfb :99 -screen 0 1400x900x24 -nolisten tcp -auth %h/repos/em_ticket_scrape/.nas/xauthority
+# Active only once the socket exists, so the poller (After= this unit) never races it.
+ExecStartPost=%h/repos/em_ticket_scrape/deploy/nas/xvfb-helper.sh wait 99
+Restart=always
+RestartSec=5
+UMask=0077
+SyslogIdentifier=ticket-poller-xvfb
+Nice=5
+
+# Deliberately NOT set: PrivateTmp. The lock (/tmp/.X99-lock) and the socket
+# (/tmp/.X11-unix/X99) must be in the real /tmp, where the poller's Chromium looks.
+# Not -nolock either: it is root-only.
+NoNewPrivileges=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=default.target

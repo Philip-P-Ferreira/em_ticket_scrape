@@ -140,6 +140,106 @@ Never delete the profile's `Singleton*` files.
   reinstall the app and subscribe again.
 - No pings at healthchecks for > 60 min means the poller is down, blocked, or the PC slept.
 
+## Running on the NAS
+
+The poller can run on the UGREEN NAS (`phils-nas.local`, UGOS = Debian 12, x86_64) instead
+of the desktop, headed under a virtual display (Xvfb). `deploy/nas/` holds that variant:
+
+- `ticket-poller-xvfb.service`: Xvfb on `:99` (1400x900x24, `-nolisten tcp`, a fresh auth
+  cookie in `.nas/xauthority` on each start), `Restart=always`. Its `xvfb-helper.sh`
+  clears a stale `/tmp/.X99-lock` of ours after a crash and holds the unit back until the
+  display's socket exists.
+- `ticket-poller.service`: the desktop unit without the graphical session, `systemd-inhibit`
+  (Access denied on UGOS) or the `ExecStop` helper. It `Requires=` the Xvfb unit (stopping
+  or restarting Xvfb stops or restarts the poller, and so does an Xvfb crash), sets
+  `DISPLAY=:99` and `XAUTHORITY`, points `HOME` and `TMPDIR` at `.nas/home` and `.nas/tmp`
+  (Chromium and Playwright write there; the real ones are world-writable on UGOS), is
+  capped at `MemoryHigh=1.5G` / `MemoryMax=2.5G` and is `WantedBy=default.target`.
+- `run.sh`: runs a `ticket-poller` command by hand in the service's environment.
+- `ticket-poller-failure.service` is the desktop one, unchanged.
+
+UGOS has no Chromium or Xvfb, and its apt/dpkg state is broken (don't `apt install`), so
+everything runs from in-project copies under `~/repos/em_ticket_scrape/.nas/` on the NAS:
+`bin/uv`, `python/` (the `.venv` links into it), `ms-playwright/chromium-1255/` (Playwright's
+Chrome for Testing, matching `playwright` in `uv.lock`) and `xvfb/root/usr/bin/Xvfb`
+(extracted from Debian's `xvfb` .deb; it uses the system xkbcomp, xkb-data and xauth).
+`push.sh` never overwrites `.nas`, `.venv`, `.env` or the state dir; `install.sh` only
+syncs `.venv` and creates `.nas/home` and `.nas/tmp`.
+
+`$HOME` on UGOS is world-writable, so the project dir is kept 0700 and the state and profile
+live inside it. `.env` on the NAS is the desktop one plus these overrides (absolute paths:
+the service's `HOME` is `.nas/home`, so `~` would point there):
+
+```sh
+CHROMIUM_PATH=/home/pferreira/repos/em_ticket_scrape/.nas/ms-playwright/chromium-1255/chrome-linux64/chrome
+BROWSER_PROFILE_DIR=/home/pferreira/repos/em_ticket_scrape/state/chromium-profile
+STATE_DIR=/home/pferreira/repos/em_ticket_scrape/state
+BROWSER_EXTRA_ARGS=--ozone-platform=x11
+```
+
+**Linger** keeps the user manager, and so the service, running with nobody logged in and
+starts it at boot. Enable it once on the NAS (polkit allows it without sudo):
+`loginctl enable-linger pferreira`; check with `loginctl show-user pferreira -p Linger`.
+
+**Push, install, enable.** The NAS rsync is restricted, so `push.sh` streams a tar over ssh:
+
+```sh
+deploy/nas/push.sh                      # on the desktop: copy the working tree to the NAS
+ssh pferreira@phils-nas.local
+cd ~/repos/em_ticket_scrape
+deploy/nas/install.sh                   # uv sync with .nas/ uv+Python, install units, daemon-reload
+systemctl --user start ticket-poller-xvfb
+deploy/nas/run.sh poll-once             # dry run, in the service's environment
+deploy/nas/run.sh test-notify
+systemctl --user enable --now ticket-poller-xvfb ticket-poller
+journalctl --user -u ticket-poller -f
+deploy/nas/install.sh --uninstall       # disable, stop and remove the units (state is kept)
+```
+
+There is no `uv` on the NAS PATH: use `deploy/nas/run.sh …` for the commands in
+[Setup](#setup) (it runs `.venv/bin/ticket-poller` with the unit's `DISPLAY`, `XAUTHORITY`,
+`HOME` and `TMPDIR`). Like the desktop installer, `install.sh` is idempotent, never enables or
+starts anything, and should be re-run after every push. It checks that the in-project uv,
+Chromium (the revision `uv.lock`'s Playwright needs) and Xvfb exist and load all their
+libraries, warns about linger and the `.env` overrides, and tells you to restart the
+service if it is running.
+
+**Never run both hosts at once.** They poll from the same IP, which doubles the
+Ticketmaster traffic and sends duplicate alerts. Switch over in this order:
+
+1. On the desktop: `systemctl --user disable --now ticket-poller`.
+2. Migrate the state DB (alert history, price baseline) while the desktop service is
+   stopped. It is in WAL mode, so take a consistent single-file copy with `.backup`
+   rather than copying `state.sqlite3` alone, then make it private on the NAS:
+
+   ```sh
+   sqlite3 ~/.local/share/em_ticket_scrape/state.sqlite3 ".backup $HOME/state-migrate.sqlite3"
+   ssh pferreira@phils-nas.local \
+     'umask 077 && mkdir -p ~/repos/em_ticket_scrape/state && cat > ~/repos/em_ticket_scrape/state/state.sqlite3' \
+     < ~/state-migrate.sqlite3
+   rm ~/state-migrate.sqlite3
+   ```
+
+   Do **not** copy the Chromium profile: it belongs to the desktop's Chromium version, and
+   Playwright's Chromium on the NAS is a different one. The NAS starts with a fresh profile
+   (that passed Ticketmaster's bot check in testing).
+3. Copy the real `.env` (mode 600) with the overrides above, then push, install and enable
+   as above.
+
+To move back, disable the NAS units (`systemctl --user disable --now ticket-poller
+ticket-poller-xvfb`) before enabling the desktop service again.
+
+**After every UGOS firmware update**, check that the system libraries Chromium and Xvfb link
+against are still there (re-running `deploy/nas/install.sh` does the same), and that linger
+survived (it lives in the overlay root fs):
+
+```sh
+cd ~/repos/em_ticket_scrape
+ldd .nas/ms-playwright/chromium-1255/chrome-linux64/chrome | grep 'not found'   # no output = OK
+ldd .nas/xvfb/root/usr/bin/Xvfb | grep 'not found'
+loginctl show-user pferreira -p Linger
+```
+
 ## Development
 
 ```sh
