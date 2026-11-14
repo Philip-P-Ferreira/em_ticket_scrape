@@ -16,12 +16,12 @@ from enum import StrEnum
 from typing import Final, Protocol
 
 from ticket_poller import messages
-from ticket_poller.config import ConfigError, Settings
-from ticket_poller.fetcher import Fetcher, write_debug_dump
+from ticket_poller.config import Settings
+from ticket_poller.dumps import try_write_dump
+from ticket_poller.fetcher import Fetcher
 from ticket_poller.logsetup import redact
 from ticket_poller.models import (
     Baseline,
-    CapturedResponse,
     Channel,
     FetchResult,
     Inventory,
@@ -403,7 +403,7 @@ class Poller:
             inventory = parse_inventory(result.responses, self._rules.wanted_quantities)
         except ParseError as exc:
             detail = f"parse: {exc}"
-            self._dump(detail, result.responses)
+            try_write_dump(self._settings, detail, result.responses)
             return self._report(started, result, PollOutcome.ERROR, detail, dry_run=dry_run)
         _log_parse_warnings(inventory)
         findings = self._findings(inventory, result.resale_eligible, started)
@@ -553,17 +553,6 @@ class Poller:
             notice = messages.resale_missing(polls=streak, ctx=self._ctx)
             if self._notify_admin(notice):
                 self._db.save_state(replace(self._db.get_state(), resale_missing_notice_sent=True))
-
-    def _dump(self, reason: str, responses: Sequence[CapturedResponse]) -> None:
-        settings = self._settings
-        try:
-            path = write_debug_dump(
-                settings.debug_dir, reason, responses, secrets=settings.secret_values()
-            )
-        except (ConfigError, OSError) as exc:
-            log.warning("could not write a debug dump: %s", exc)
-            return
-        log.info("debug dump written: %s", path)
 
     @property
     def _db(self) -> Store:

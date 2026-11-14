@@ -16,7 +16,7 @@ from typing import Final
 
 import httpx
 
-from ticket_poller import __version__, fetcher, messages, notify, poller
+from ticket_poller import __version__, dumps, fetcher, messages, notify, poller
 from ticket_poller.config import ConfigError, Settings, load_settings, secure_runtime
 from ticket_poller.logsetup import configure_logging
 from ticket_poller.models import Channel, NoticeKind
@@ -150,7 +150,7 @@ def _cmd_poll_once(args: argparse.Namespace, settings: Settings) -> int:
 
     if args.save is not None:
         try:
-            saved = fetcher.save_responses(
+            saved = dumps.save_responses(
                 args.save, report.fetch.responses, settings.secret_values()
             )
         except (ConfigError, OSError) as exc:
