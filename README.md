@@ -198,7 +198,7 @@ version that is already there re-checks that build before relinking. `deploy/nas
 it with those libraries and without Debian's launcher flags (Arch's launcher adds none).
 Keep its major version in step with the desktop's `chromium --version`: re-run
 `fetch-chromium.sh` when the desktop moves to a new major version, then restart the
-service. The old `.nas/ms-playwright/` is unused and can be deleted.
+service.
 
 UGOS creates `$HOME`, `~/repos` and new dirs in them 0777 with no sticky bit, as `ls -l`
 shows them (the home also carries a UGOS ACL, the `system.ugacl_self` xattr enforced by the
