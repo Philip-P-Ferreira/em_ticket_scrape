@@ -16,6 +16,7 @@ from tests.sample_env import NTFY_TOPIC, EnvFileFactory
 from ticket_poller.config import Settings, load_settings
 from ticket_poller.fetcher import (
     PROFILE_IN_USE_MESSAGE,
+    BrowserError,
     PageEvidence,
     PlaywrightFetcher,
     classify_failure,
@@ -452,6 +453,43 @@ class TestFetch:
         assert result.detail == "navigation: Page.goto: net::ERR_NAME_NOT_RESOLVED"
         assert launcher.tabs[0].closed
 
+    def test_browser_dying_during_shutdown_is_a_stop(
+        self, settings: Settings, time: FakeTime
+    ) -> None:
+        stop = threading.Event()
+        launcher = FakeLauncher(event_page(), time)
+
+        def shutdown() -> None:
+            stop.set()
+            raise BrowserError("Target page, context or browser has been closed")
+
+        launcher.on_wait = shutdown
+
+        assert make_fetcher(settings, launcher, time, stop).fetch() is None
+
+    def test_navigation_failing_during_shutdown_is_a_stop(
+        self, settings: Settings, time: FakeTime
+    ) -> None:
+        stop = threading.Event()
+        stop.set()
+        launcher = FakeLauncher(event_page(navigation_error="Page.goto: net::ERR_ABORTED"), time)
+
+        assert make_fetcher(settings, launcher, time, stop).fetch() is None
+
+    def test_responses_queued_between_polls_are_dropped(
+        self, settings: Settings, time: FakeTime
+    ) -> None:
+        late = FakeRawResponse(f"{EVENT_API}/offers?q=late", 200, {})
+        script = event_page()
+        script.on_load = (*script.on_load, (30.0, late))
+        fetcher = make_fetcher(settings, FakeLauncher(script, time), time)
+
+        fetcher.fetch()
+        time.now += 60
+        second = fetcher.fetch()
+
+        assert urls(second) == [OFFER_FACETS.url, QP2.url, QP3.url]
+
     def test_closed_window_is_a_browser_error(self, settings: Settings, time: FakeTime) -> None:
         closed = "Page.reload: Target page, context or browser has been closed"
         launcher = FakeLauncher(event_page(navigation_error=closed), time)
@@ -554,6 +592,17 @@ class TestDumps:
         assert stat.S_IMODE(path.stat().st_mode) == 0o600
         assert stat.S_IMODE(settings.debug_dir.stat().st_mode) == 0o700
 
+    def test_redaction_keeps_the_json_valid(self, tmp_path: Path) -> None:
+        quoted = CapturedResponse(QP2.url, 200, {"link": 'https://x/?apikey=PUBLICKEY"&q=1'})
+
+        dump = write_debug_dump(tmp_path / "debug", "blocked", [quoted])
+        (saved,) = save_responses(tmp_path / "saved", [quoted])
+
+        assert json.loads(dump.read_text())["responses"][0]["response"] == {
+            "link": 'https://x/?apikey=***"&q=1'
+        }
+        assert json.loads(saved.read_text())["response"] == {"link": 'https://x/?apikey=***"&q=1'}
+
     def test_keeps_the_newest_twenty(self, tmp_path: Path) -> None:
         directory = tmp_path / "debug"
         start = datetime(2026, 11, 14, tzinfo=UTC)
@@ -578,3 +627,13 @@ class TestDumps:
         assert "PUBLICKEY" not in text
         assert json.loads(text).keys() == {"_source_url", "status", "response"}
         assert stat.S_IMODE((tmp_path / "dump").stat().st_mode) == 0o700
+
+    def test_saving_into_an_existing_directory_keeps_its_mode(self, tmp_path: Path) -> None:
+        directory = tmp_path / "shared"
+        directory.mkdir(mode=0o755)
+        directory.chmod(0o755)
+
+        (path,) = save_responses(directory, [QP2])
+
+        assert stat.S_IMODE(directory.stat().st_mode) == 0o755
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600

@@ -77,10 +77,17 @@ class FakeTab:
         return self._load()
 
     def _load(self) -> RawResponse | None:
+        self._deliver_arrived()
+        self._scheduled.clear()  # navigating cancels the old page's pending requests
         if self.script.navigation_error is not None:
             raise BrowserError(self.script.navigation_error)
         self._schedule(self.script.on_load)
         return self.script.document
+
+    def _deliver_arrived(self) -> None:
+        """Like Playwright: responses that arrived while idle reach the sink on the next call."""
+        while self._scheduled and self._scheduled[0][0] <= self.time.now:
+            self.sink(self._scheduled.pop(0)[1])
 
     def _schedule(self, script: Script) -> None:
         self._scheduled.extend((self.time.now + delay, replace(r)) for delay, r in script)
@@ -107,9 +114,11 @@ class FakeTab:
         self._schedule(self.script.dropdown[qty])
 
     def content(self) -> str:
+        self._deliver_arrived()
         return self.script.html
 
     def title(self) -> str:
+        self._deliver_arrived()
         return self.script.title
 
     def close(self) -> None:

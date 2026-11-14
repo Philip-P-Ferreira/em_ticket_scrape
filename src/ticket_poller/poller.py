@@ -6,10 +6,11 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from ticket_poller import messages
-from ticket_poller.config import Settings
+from ticket_poller.config import ConfigError, Settings
 from ticket_poller.fetcher import Fetcher, write_debug_dump
 from ticket_poller.models import (
     Baseline,
+    CapturedResponse,
     Channel,
     FetchResult,
     Inventory,
@@ -59,7 +60,10 @@ class PollPreview:
 def preview_poll(
     settings: Settings, fetcher: Fetcher, store: Store | None, started: datetime
 ) -> PollPreview | None:
-    """Run fetch → parse → rules against a read-only store (or none yet); None if stopped."""
+    """Run fetch → parse → rules against a read-only store (or none yet); None if stopped.
+
+    T6 folds this into ``Poller.poll_once(dry_run=True)``.
+    """
     result = fetcher.fetch()
     if result is None:
         return None
@@ -72,9 +76,7 @@ def preview_poll(
         inventory = parse_inventory(result.responses, rules.wanted_quantities)
     except ParseError as exc:
         detail = f"parse: {exc}"
-        write_debug_dump(
-            settings.debug_dir, detail, result.responses, secrets=settings.secret_values()
-        )
+        _dump(settings, detail, result.responses)
         return PollPreview(result, PollOutcome.ERROR, detail, None, has_state)
 
     capture = resale_capture(inventory, result.resale_eligible)
@@ -95,6 +97,17 @@ def preview_poll(
     )
     outcome = PollOutcome.PARTIAL if capture is ResaleCapture.MISSING else PollOutcome.OK
     return PollPreview(result, outcome, result.detail, findings, has_state)
+
+
+def _dump(settings: Settings, reason: str, responses: Sequence[CapturedResponse]) -> None:
+    try:
+        path = write_debug_dump(
+            settings.debug_dir, reason, responses, secrets=settings.secret_values()
+        )
+    except (ConfigError, OSError) as exc:
+        log.warning("could not write a debug dump: %s", exc)
+        return
+    log.info("debug dump written: %s", path)
 
 
 def _with_pending(

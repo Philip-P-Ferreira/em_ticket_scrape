@@ -130,6 +130,18 @@ class TestPreview:
         (dump,) = settings.debug_dir.iterdir()
         assert dump.name.endswith("-parse-picks-expected-a-list-got-str.json")
 
+    def test_unwritable_debug_dir_only_warns(
+        self, settings: Settings, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        settings.debug_dir.parent.mkdir(parents=True, exist_ok=True)
+        settings.debug_dir.write_text("not a directory")
+        broken = CapturedResponse(f"{EVENT_API}/quickpicks?qty=2", 200, {"picks": "x"})
+
+        found = preview(settings, fetched(PRIMARY[0], broken))
+
+        assert found.outcome is PollOutcome.ERROR
+        assert "could not write a debug dump" in caplog.text
+
     def test_missing_resale_capture_is_partial(self, settings: Settings) -> None:
         found = preview(settings, fetched(*PRIMARY, resale_eligible=True, recycled=True))
 

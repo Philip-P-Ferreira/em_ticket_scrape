@@ -23,7 +23,7 @@ from playwright.sync_api import Locator, Page, Playwright, sync_playwright
 from playwright.sync_api import Response as PlaywrightResponse
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
-from ticket_poller.config import Settings, ensure_private_dir
+from ticket_poller.config import ConfigError, Settings, ensure_private_dir
 from ticket_poller.logsetup import redact
 from ticket_poller.models import CapturedResponse, FetchResult, PollOutcome
 from ticket_poller.parsing import quickpicks_qty
@@ -249,6 +249,21 @@ def scrub(text: str, secrets: Iterable[str] = ()) -> str:
     return redact(_API_CREDENTIAL_RE.sub(r"\1=***", text), secrets)
 
 
+def _scrubbed(value: Any, secrets: Iterable[str]) -> Any:
+    """``value`` with every string in it scrubbed; done before encoding so JSON stays valid."""
+    if isinstance(value, str):
+        return scrub(value, secrets)
+    if isinstance(value, Mapping):
+        return {_scrubbed(k, secrets): _scrubbed(v, secrets) for k, v in value.items()}
+    if isinstance(value, list | tuple):
+        return [_scrubbed(item, secrets) for item in value]
+    return value
+
+
+def _redacted_json(value: Any, secrets: Iterable[str]) -> str:
+    return json.dumps(_scrubbed(value, tuple(secrets)), indent=1)
+
+
 def _capped(text: str, limit: int) -> str:
     if len(text) <= limit:
         return text
@@ -290,7 +305,7 @@ def write_debug_dump(
         "responses": [_fixture(r, MAX_DUMP_BODY_CHARS) for r in responses],
         "html": _capped(html, MAX_DUMP_HTML_CHARS),
     }
-    _write_private(path, scrub(json.dumps(dump, indent=1), secrets))
+    _write_private(path, _redacted_json(dump, secrets))
     _prune_dumps(directory, DEBUG_DUMPS_KEPT)
     return path
 
@@ -304,14 +319,17 @@ def _prune_dumps(directory: Path, keep: int) -> None:
 def save_responses(
     directory: Path, responses: Sequence[CapturedResponse], secrets: Iterable[str] = ()
 ) -> list[Path]:
-    """Write each body as a test fixture (``{_source_url, status, response}``) for ``--save``."""
+    """Write each body as a test fixture (``{_source_url, status, response}``) for ``--save``.
+
+    A new ``directory`` is created 0700; an existing one keeps its mode. Files are 0600.
+    """
     secrets = tuple(secrets)
-    ensure_private_dir(directory)
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
     paths: list[Path] = []
     for number, response in enumerate(responses, start=1):
         name = Path(urlsplit(response.url).path).name or "response"
         path = directory / f"{number:02d}-{name}-{response.status}.json"
-        _write_private(path, scrub(json.dumps(_fixture(response), indent=1), secrets) + "\n")
+        _write_private(path, _redacted_json(_fixture(response), secrets) + "\n")
         paths.append(path)
     return paths
 
@@ -348,10 +366,11 @@ class PlaywrightFetcher:
             fresh = self._tab is None
             tab = self._ensure_tab()
             result = self._load(tab, fresh=fresh, started=started, recycled=recycled)
-        except LaunchError as exc:
-            result = self._failure(PollOutcome.ERROR, str(exc), started)
-        except BrowserError as exc:
-            result = self._failure(PollOutcome.ERROR, f"browser: {first_line(exc)}", started)
+        except (LaunchError, BrowserError) as exc:
+            if self._stop.is_set():
+                return None  # the browser went away during shutdown: stopped, not an error
+            detail = str(exc) if isinstance(exc, LaunchError) else f"browser: {first_line(exc)}"
+            result = self._failure(PollOutcome.ERROR, detail, started)
         if result is not None and result.outcome is not PollOutcome.OK:
             self.close()
         return result
@@ -391,7 +410,7 @@ class PlaywrightFetcher:
         return self._tab
 
     def _on_response(self, response: RawResponse) -> None:
-        # Read bodies on arrival: Chromium drops earlier bodies once the qty select fires.
+        # Read bodies on arrival, while Chromium still holds them.
         if self._is_capture(response):
             self._responses.append(read_response(response))
             self._blocklisted |= _blocklisted(response)
@@ -404,11 +423,14 @@ class PlaywrightFetcher:
     def _load(
         self, tab: BrowserTab, *, fresh: bool, started: float, recycled: bool
     ) -> FetchResult | None:
+        tab.title()  # dispatches responses queued since the last poll, so the clear drops them
         self._responses.clear()
         self._blocklisted = False
         try:
             document = self._navigate(tab, fresh=fresh)
         except BrowserError as exc:
+            if self._stop.is_set():
+                return None
             if _CLOSED_RE.search(str(exc)):
                 raise
             return self._failure(PollOutcome.ERROR, f"navigation: {first_line(exc)}", started)
@@ -506,7 +528,7 @@ class PlaywrightFetcher:
                 title=title,
                 secrets=self._settings.secret_values(),
             )
-        except (OSError, ValueError) as exc:
+        except (ConfigError, OSError) as exc:
             log.warning("could not write a debug dump: %s", exc)
             return
         log.info("debug dump written: %s", path)
@@ -656,6 +678,7 @@ def launch_chromium(settings: Settings, sink: ResponseSink) -> BrowserTab:
                     *settings.browser_extra_args,
                 ],
                 ignore_default_args=["--enable-automation"],
+                handle_sigint=False,
             )
             page = context.pages[0] if context.pages else context.new_page()
     except BaseException:
