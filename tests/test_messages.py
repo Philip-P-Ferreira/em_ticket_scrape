@@ -69,6 +69,8 @@ CTX = MessageContext(
     tz=TZ,
     stop_after=datetime(2027, 4, 28, tzinfo=TZ),
     rules=RULES,
+    baseline_window_days=7,
+    failure_alert_after=timedelta(hours=1),
 )
 BASELINE = Baseline(median_cents=Decimal(43500), samples=412, ready=True)
 

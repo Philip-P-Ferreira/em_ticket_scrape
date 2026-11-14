@@ -77,8 +77,8 @@ class MessageContext:
     tz: ZoneInfo
     stop_after: datetime
     rules: RuleConfig
-    baseline_window_days: int = 7
-    failure_alert_after: timedelta = timedelta(hours=1)
+    baseline_window_days: int
+    failure_alert_after: timedelta
 
     @classmethod
     def from_settings(cls, settings: Settings) -> "MessageContext":

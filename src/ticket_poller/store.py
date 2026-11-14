@@ -462,10 +462,10 @@ class Store:
                    WHERE started_at >= ? AND {_SUCCEEDED} AND resale_capture = ?""",
                 (start, *_SUCCESS, ResaleCapture.CAPTURED.value),
             ),
-            cheapest_primary=_by_qty(latest, _price_column, InventoryType.PRIMARY),
-            cheapest_resale=_by_qty(latest, _price_column, InventoryType.RESALE),
-            cheapest_primary_label=_by_qty(latest, _label_column, InventoryType.PRIMARY),
-            cheapest_resale_label=_by_qty(latest, _label_column, InventoryType.RESALE),
+            cheapest_primary=_prices_by_qty(latest, InventoryType.PRIMARY),
+            cheapest_resale=_prices_by_qty(latest, InventoryType.RESALE),
+            cheapest_primary_label=_labels_by_qty(latest, InventoryType.PRIMARY),
+            cheapest_resale_label=_labels_by_qty(latest, InventoryType.RESALE),
             resale_listings_now=(latest["resale_listings"] or 0) if latest is not None else 0,
             low_primary=self._lowest_cheapest(InventoryType.PRIMARY, start),
             low_resale=self._lowest_cheapest(InventoryType.RESALE, start),
@@ -703,8 +703,8 @@ def _poll_record(data: sqlite3.Row) -> PollRecord:
     if outcome.succeeded:
         snapshot = PriceSnapshot(
             baseline_sample_cents=data["baseline_sample_cents"],
-            primary_by_qty=_by_qty(data, _price_column, InventoryType.PRIMARY),
-            resale_by_qty=_by_qty(data, _price_column, InventoryType.RESALE),
+            primary_by_qty=_prices_by_qty(data, InventoryType.PRIMARY),
+            resale_by_qty=_prices_by_qty(data, InventoryType.RESALE),
         )
     capture = data["resale_capture"]
     return PollRecord(
@@ -726,13 +726,20 @@ def _poll_record(data: sqlite3.Row) -> PollRecord:
     )
 
 
-def _by_qty(
-    data: sqlite3.Row | None, column: Callable[[InventoryType, int], str], kind: InventoryType
-) -> dict[int, Any]:
-    """Per-quantity values of ``column``; all None when there is no row."""
-    return {qty: None if data is None else data[column(kind, qty)] for qty in SNAPSHOT_QUANTITIES}
+def _prices_by_qty(data: sqlite3.Row | None, kind: InventoryType) -> dict[int, int | None]:
+    """Per-quantity cheapest prices in cents; all None when there is no row."""
+    return {
+        qty: None if data is None else data[_price_column(kind, qty)] for qty in SNAPSHOT_QUANTITIES
+    }
+
+
+def _labels_by_qty(data: sqlite3.Row | None, kind: InventoryType) -> dict[int, str | None]:
+    """Per-quantity labels of the cheapest listings; all None when there is no row."""
+    return {
+        qty: None if data is None else data[_label_column(kind, qty)] for qty in SNAPSHOT_QUANTITIES
+    }
 
 
 def _labels(data: sqlite3.Row, kind: InventoryType) -> dict[int, str]:
-    labels = _by_qty(data, _label_column, kind)
+    labels = _labels_by_qty(data, kind)
     return {qty: label for qty, label in labels.items() if label is not None}
