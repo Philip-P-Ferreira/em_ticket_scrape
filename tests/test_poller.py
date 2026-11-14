@@ -51,7 +51,7 @@ def fake_fetcher(monkeypatch: pytest.MonkeyPatch) -> Iterator[FakeFetcher]:
     assert fake.closed
 
 
-def dry_poller(settings: Settings, result: FetchResult | None, store: Store | None) -> Poller:
+def dry_poller(settings: Settings, result: FetchResult | None, store: Store) -> Poller:
     """A poller whose notifier and pinger would fail the test if a dry run used them."""
     clock = FakeClock(NOW)
     notifier = Notifier(
@@ -63,7 +63,11 @@ def dry_poller(settings: Settings, result: FetchResult | None, store: Store | No
 def preview(
     settings: Settings, result: FetchResult | None, store: Store | None = None
 ) -> PollReport:
-    found = dry_poller(settings, result, store).poll_once(dry_run=True)
+    if store is None:
+        with Store.open_empty() as empty:
+            found = dry_poller(settings, result, empty).poll_once(dry_run=True)
+    else:
+        found = dry_poller(settings, result, store).poll_once(dry_run=True)
     assert found is not None
     return found
 
@@ -165,7 +169,8 @@ class TestPreview:
         assert "resale_capture=missing (page isResaleEligible=true)" in report
 
     def test_stopped_fetch(self, settings: Settings) -> None:
-        assert dry_poller(settings, None, None).poll_once(dry_run=True) is None
+        with Store.open_empty() as store:
+            assert dry_poller(settings, None, store).poll_once(dry_run=True) is None
 
 
 def deliver(settings: Settings, result: FetchResult, *, sent: int, email_only: int) -> None:

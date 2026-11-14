@@ -945,3 +945,10 @@ class TestConcurrency:
             assert len(reader.recent_polls(10)) == 1
 
         assert len(reader.recent_polls(10)) == 2
+
+
+def test_open_empty_is_a_migrated_store_without_history() -> None:
+    with Store.open_empty() as store:
+        assert not store.persistent
+        assert store.get_state() == RuntimeState()
+        assert store.recent_polls(1) == []

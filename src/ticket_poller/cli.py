@@ -83,7 +83,7 @@ def _cmd_run(args: argparse.Namespace, settings: Settings) -> int:
 def _build_poller(
     stack: ExitStack,
     settings: Settings,
-    store: Store | None,
+    store: Store,
     stop: threading.Event,
     *,
     live: bool,
@@ -93,12 +93,11 @@ def _build_poller(
 
     Only a live poller records notification attempts (a dry run sends nothing anyway).
     """
-    if store is not None:
-        stack.enter_context(store)
+    stack.enter_context(store)
     stack.enter_context(_stop_on_signals(stop))
     clock = SystemClock(stop)
     client = stack.enter_context(httpx.Client())
-    audit = poller.audit_to(store, clock) if live and store is not None else None
+    audit = poller.audit_to(store, clock) if live else None
     return poller.Poller(
         settings,
         stack.enter_context(closing(fetcher.build_fetcher(settings, stop))),
@@ -125,11 +124,11 @@ def _stop_on_signals(stop: threading.Event) -> Iterator[None]:
             signal.signal(signum, handler)
 
 
-def _open_store_if_any(settings: Settings) -> Store | None:
+def _open_store_if_any(settings: Settings) -> Store:
     try:
         return Store.open_readonly(settings.db_path)
     except NoStateError:
-        return None
+        return Store.open_empty()
 
 
 def _cmd_poll_once(args: argparse.Namespace, settings: Settings) -> int:

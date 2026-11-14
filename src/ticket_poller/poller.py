@@ -35,7 +35,7 @@ from ticket_poller.models import (
 from ticket_poller.notify import AuditHook, Delivery, Notifier
 from ticket_poller.parsing import ParseError, parse_inventory, resale_capture
 from ticket_poller.report import poll_summary
-from ticket_poller.rules import candidates, compute_baseline, evaluate, price_snapshot
+from ticket_poller.rules import candidates, evaluate, price_snapshot
 from ticket_poller.schedule import (
     Clock,
     PollTiming,
@@ -136,13 +136,13 @@ def audit_to(store: Store, clock: Clock) -> AuditHook:
 
 class Poller:
     """Runs polls and the service loop. ``store`` is the writer, or for a dry run the
-    read-only store (None before the first live poll)."""
+    read-only store (``Store.open_empty()`` before the first live poll)."""
 
     def __init__(
         self,
         settings: Settings,
         fetcher: Fetcher,
-        store: Store | None,
+        store: Store,
         notifier: Notifier,
         pinger: Pinger,
         clock: Clock,
@@ -194,8 +194,8 @@ class Poller:
 
     def _first_poll_at(self, now: datetime) -> datetime:
         """Now, unless a restart lands inside the persisted backoff of a failure streak."""
-        state = self._db.get_state()
-        last = self._db.recent_polls(1)
+        state = self._store.get_state()
+        last = self._store.recent_polls(1)
         if state.consecutive_failures == 0 or not last or last[0].outcome.succeeded:
             return now
         outcome = last[0].outcome
@@ -232,7 +232,7 @@ class Poller:
         return False
 
     def _schedule_after(self, report: PollReport) -> datetime:
-        streak = self._streak(self._db.get_state(), report.outcome)
+        streak = self._streak(self._store.get_state(), report.outcome)
         delay = poll_delay(report.outcome, streak, self._timing, self._rng)
         level = logging.INFO if report.succeeded else logging.WARNING
         log.log(level, "%s next=%s", poll_summary(report, self._ctx), _seconds_text(delay))
@@ -245,7 +245,7 @@ class Poller:
         return state.consecutive_failures
 
     def _next_wake(self, now: datetime) -> datetime:
-        state = self._db.get_state()
+        state = self._store.get_state()
         tz, hour = self._settings.tz, self._settings.canary_hour
         return next_wake(
             now,
@@ -272,48 +272,48 @@ class Poller:
                 log.exception("%s notice failed; retrying at a later wake", name)
 
     def _announce_outage(self, now: datetime) -> None:
-        state = self._db.get_state()
+        state = self._store.get_state()
         deadline = outage_deadline(state, self._outage_after)
         if deadline is None or now < deadline or state.failure_started_at is None:
             return
-        last = self._db.recent_polls(1)[0]
+        last = self._store.recent_polls(1)[0]
         notice = messages.outage(
             failing_for=now - state.failure_started_at,
             outcome=last.outcome,
-            counts=self._db.stats_since(state.failure_started_at).outcomes,
+            counts=self._store.stats_since(state.failure_started_at).outcomes,
             last_detail=last.detail,
             next_retry_at=self._next_poll,
             ctx=self._ctx,
         )
         delivered = self._notify_admin(notice)
-        self._db.save_state(self._db.get_state().record_outage_notice(delivered))
+        self._store.save_state(self._store.get_state().record_outage_notice(delivered))
 
     def _announce_recovery(self, _now: datetime) -> None:
-        state = self._db.get_state()
+        state = self._store.get_state()
         if not state.recovery_pending:
             return
         duration = timedelta(seconds=state.last_outage_duration_s or 0)
         delivered = self._notify_admin(messages.recovered(outage_duration=duration))
-        self._db.save_state(self._db.get_state().record_recovery_notice(delivered))
+        self._store.save_state(self._store.get_state().record_recovery_notice(delivered))
 
     def _send_canary(self, now: datetime) -> None:
         tz, hour = self._settings.tz, self._settings.canary_hour
-        if not canary_due(now, self._db.get_state().last_canary_date, tz, hour):
+        if not canary_due(now, self._store.get_state().last_canary_date, tz, hour):
             return
-        email = messages.canary(canary_report(self._db, self._settings, now), self._ctx)
+        email = messages.canary(canary_report(self._store, self._settings, now), self._ctx)
         delivery = self._send(NoticeKind.CANARY, to=[self._settings.admin_email], email=email)
         today = now.astimezone(self._settings.tz).date()
-        self._db.save_state(
-            self._db.get_state().record_canary(today, email_ok=delivery.ok(Channel.EMAIL))
+        self._store.save_state(
+            self._store.get_state().record_canary(today, email_ok=delivery.ok(Channel.EMAIL))
         )
 
     def _finish(self) -> ExitReason:
         """The auto-stop time has passed: send the one-time finished notice and exit."""
         try:
-            if not self._db.get_state().finished_notice_sent and self._notify_admin(
+            if not self._store.get_state().finished_notice_sent and self._notify_admin(
                 messages.finished(ctx=self._ctx)
             ):
-                self._db.save_state(replace(self._db.get_state(), finished_notice_sent=True))
+                self._store.save_state(replace(self._store.get_state(), finished_notice_sent=True))
         except Exception:
             log.exception("finished notice failed")
         log.info("auto-stop time %s reached; exiting", self._settings.stop_after.isoformat())
@@ -342,7 +342,7 @@ class Poller:
 
     def _track_email(self, kind: NoticeKind, delivery: Delivery) -> None:
         """One ops push per episode of failing email; a delivered email ends the episode."""
-        state = self._db.get_state().record_email(delivery.ok(Channel.EMAIL))
+        state = self._store.get_state().record_email(delivery.ok(Channel.EMAIL))
         failing = state.consecutive_email_failures
         if (
             failing
@@ -358,7 +358,7 @@ class Poller:
             )
             pushed = self._notifier.send(NoticeKind.EMAIL_FAILING, to=(), push=push)
             state = replace(state, email_failing_notice_sent=pushed.ok(Channel.PUSH))
-        self._db.save_state(state)
+        self._store.save_state(state)
 
     # --- one poll (§8 poll_once) ---------------------------------------------------------------
 
@@ -426,17 +426,13 @@ class Poller:
         *,
         dry_run: bool = False,
     ) -> PollReport:
-        has_state = self._store is not None
+        has_state = self._store.persistent
         return PollReport(started, result, outcome, detail, findings, has_state, dry_run)
 
     def _findings(self, inventory: Inventory, eligible: bool | None, now: datetime) -> Findings:
         capture = resale_capture(inventory, eligible)
         _log_capture(capture, eligible)
-        baseline = (
-            current_baseline(self._store, self._settings, now)
-            if self._store is not None
-            else compute_baseline([], self._settings.baseline_min_samples)
-        )
+        baseline = current_baseline(self._store, self._settings, now)
         current = tuple(candidates(inventory, self._rules))
         resolved = tuple(self._resolve(current, now))
         keyed = key_matches(evaluate(inventory, baseline, self._rules), resolved)
@@ -455,20 +451,16 @@ class Poller:
         )
 
     def _resolve(self, current: Sequence[Listing], now: datetime) -> list[Resolved]:
-        if self._store is None:
-            return [Resolved(listing.identity, listing.identity, False) for listing in current]
         return self._store.resolve(current, now, self._rearm_after)
 
     def _pending_keys(
         self, keyed: Sequence[tuple[str, Match]], channel: Channel, resolved: Sequence[Resolved]
     ) -> set[str]:
-        if self._store is None:
-            return {key for key, _ in keyed}
         return {key for key, _ in self._store.pending(keyed, channel, resolved)}
 
     def _record(self, report: PollReport) -> None:
         """Commit a live poll: observations, the poll row and the loop state, atomically."""
-        store, findings, now = self._db, report.findings, report.started_at
+        store, findings, now = self._store, report.findings, report.started_at
         with store.transaction():
             if findings is not None:
                 store.observe(findings.resolved, findings.candidates, now)
@@ -513,7 +505,7 @@ class Poller:
                 break
             if self._send_alert(channel, owed, findings.baseline):
                 keyed = [(status.key, status.match) for status in owed]
-                self._db.mark_delivered(keyed, channel, self._clock.now())
+                self._store.mark_delivered(keyed, channel, self._clock.now())
                 for status in owed:
                     sent[status.key].add(channel)
         matches = tuple(
@@ -529,7 +521,7 @@ class Poller:
         if channel is Channel.PUSH:
             push = messages.alert_push(matches, self._ctx)
             return self._send(NoticeKind.ALERT, to=to, push=push).ok(channel)
-        delivered = self._db.delivered_keys([status.key for status in owed], channel)
+        delivered = self._store.delivered_keys([status.key for status in owed], channel)
         upgraded = [status.match.listing.identity for status in owed if status.key in delivered]
         email = messages.alert_email(
             matches, baseline, self._ctx, self._clock.now(), upgraded=upgraded
@@ -541,23 +533,21 @@ class Poller:
         findings = report.findings
         if findings is None:
             return
-        state = self._db.get_state()
+        state = self._store.get_state()
         if report.fetch.resale_eligible and not state.resale_eligible_notice_sent:
             notice = messages.resale_eligible(capture=findings.capture, ctx=self._ctx)
             if self._notify_admin(notice):
-                self._db.save_state(replace(self._db.get_state(), resale_eligible_notice_sent=True))
-        state = self._db.get_state()
+                self._store.save_state(
+                    replace(self._store.get_state(), resale_eligible_notice_sent=True)
+                )
+        state = self._store.get_state()
         streak = state.resale_missing_streak
         if streak >= RESALE_MISSING_POLLS and not state.resale_missing_notice_sent:
             notice = messages.resale_missing(polls=streak, ctx=self._ctx)
             if self._notify_admin(notice):
-                self._db.save_state(replace(self._db.get_state(), resale_missing_notice_sent=True))
-
-    @property
-    def _db(self) -> Store:
-        if self._store is None:
-            raise RuntimeError("a live poll needs the state database")
-        return self._store
+                self._store.save_state(
+                    replace(self._store.get_state(), resale_missing_notice_sent=True)
+                )
 
 
 def _log_parse_warnings(inventory: Inventory) -> None:

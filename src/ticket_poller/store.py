@@ -6,6 +6,8 @@ Two ways to open the database (§13):
   instance lock. It enables WAL and runs any pending migrations in ``BEGIN IMMEDIATE``.
 - ``Store.open_readonly`` (``status``, ``canary-now``, dry-run ``poll-once``) opens the
   file with ``mode=ro``. It never migrates, and refuses a schema it doesn't match.
+- ``Store.open_empty`` (dry-run ``poll-once`` before any state file exists) is a migrated
+  in-memory database with no history.
 
 Timestamps are stored as aware UTC ISO-8601 text with a fixed width, so they sort
 lexicographically. Write methods are atomic on their own and join an enclosing
@@ -194,9 +196,10 @@ class _StoredListing(NamedTuple):
 class Store:
     """The state database. Use as a context manager, or call ``close()``."""
 
-    def __init__(self, conn: sqlite3.Connection) -> None:
+    def __init__(self, conn: sqlite3.Connection, *, persistent: bool = True) -> None:
         conn.row_factory = sqlite3.Row
         self._conn = conn
+        self.persistent = persistent
 
     @classmethod
     def open_writer(cls, path: Path) -> Self:
@@ -210,6 +213,12 @@ class Store:
             raise NoStateError(f"no state yet: {path} does not exist")
         target = f"{path.resolve().as_uri()}?mode=ro"
         return cls(_connect(path, target, partial(_prepare_reader, path=path), uri=True))
+
+    @classmethod
+    def open_empty(cls) -> Self:
+        """A migrated in-memory store with no history, for a dry run before any state exists."""
+        memory = Path(":memory:")
+        return cls(_connect(memory, ":memory:", _prepare_writer), persistent=False)
 
     def close(self) -> None:
         self._conn.close()
