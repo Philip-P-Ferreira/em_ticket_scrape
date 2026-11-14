@@ -45,9 +45,17 @@ ELIGIBLE_HTML = (
 OFFER_FACETS = load_captured("nk_facets_inventorytypes_offer")
 QP2 = load_captured("nk_quickpicks_qty2")
 QP3 = load_captured("nk_quickpicks_qty3")
+WANTED = frozenset({2, 3})
 DYNAMIC_BLOCK = CapturedResponse(
     f"{EVENT_API}/quickpicks?qty=2", 403, {"response": "dynamic_block"}
 )
+
+
+def empty_quickpicks(qty: int, *, total: int = 0) -> CapturedResponse:
+    """Quickpicks for ``qty`` with no picks (``total`` > 0: only a later page has some)."""
+    assert QP2.body is not None
+    body = {**QP2.body, "total": total, "picks": [], "_embedded": {"offer": []}}
+    return CapturedResponse(QP2.url.replace("qty=2", f"qty={qty}"), 200, body)
 
 
 def block_page() -> str:
@@ -175,25 +183,40 @@ class TestClassifyLaunchError:
 
 class TestClassifyFailure:
     def test_offer_facets_and_quickpicks_are_ok(self) -> None:
-        assert classify_failure(evidence(OFFER_FACETS, QP2)) == (PollOutcome.OK, "")
+        assert classify_failure(evidence(OFFER_FACETS, QP2), WANTED) == (PollOutcome.OK, "")
 
     def test_data_wins_over_block_signals(self) -> None:
         found = evidence(OFFER_FACETS, QP2, DYNAMIC_BLOCK, status=401, blocklisted=True)
 
-        assert classify_failure(found) == (PollOutcome.OK, "")
+        assert classify_failure(found, WANTED) == (PollOutcome.OK, "")
 
     def test_missing_quickpicks(self) -> None:
         found = evidence(OFFER_FACETS, DYNAMIC_BLOCK, status=403)
 
-        assert classify_failure(found) == (PollOutcome.ERROR, "missing quickpicks")
+        assert classify_failure(found, WANTED) == (PollOutcome.ERROR, "missing quickpicks")
+
+    def test_only_an_unwanted_qty_is_missing_quickpicks(self) -> None:
+        found = evidence(OFFER_FACETS, empty_quickpicks(1, total=86))
+
+        assert classify_failure(found, WANTED) == (PollOutcome.ERROR, "missing quickpicks")
+
+    @pytest.mark.parametrize("quantities", [(2, 3), (3,), (2, 1)], ids=str)
+    def test_empty_wanted_quickpicks_are_ok(self, quantities: tuple[int, ...]) -> None:
+        """Sold-out pairs/triples: TM answers with zero picks, which is data."""
+        found = evidence(OFFER_FACETS, *(empty_quickpicks(qty) for qty in quantities))
+
+        assert classify_failure(found, WANTED) == (PollOutcome.OK, "")
 
     def test_missing_offer_facets(self) -> None:
-        assert classify_failure(evidence(QP2)) == (PollOutcome.ERROR, "missing offer facets")
+        assert classify_failure(evidence(QP2), WANTED) == (
+            PollOutcome.ERROR,
+            "missing offer facets",
+        )
 
     def test_saved_block_page(self) -> None:
         found = evidence(status=401, title=page_title(block_page()))
 
-        assert classify_failure(found) == (
+        assert classify_failure(found, WANTED) == (
             PollOutcome.BLOCKED,
             'blocked: document 401, title "Let\'s Get Your Identity Verified"',
         )
@@ -201,24 +224,27 @@ class TestClassifyFailure:
     def test_paused_page_with_tm_bl(self) -> None:
         found = evidence(status=403, title=PAUSED, blocklisted=True)
 
-        outcome, detail = classify_failure(found)
+        outcome, detail = classify_failure(found, WANTED)
 
         assert outcome is PollOutcome.BLOCKED
         assert detail == f"blocked: document 403, tm-bl, title '{PAUSED}'"
 
     def test_dynamic_block_bodies(self) -> None:
-        assert classify_failure(evidence(DYNAMIC_BLOCK)) == (
+        assert classify_failure(evidence(DYNAMIC_BLOCK), WANTED) == (
             PollOutcome.BLOCKED,
             "blocked: dynamic_block",
         )
 
     def test_nothing_captured_is_a_timeout(self) -> None:
-        assert classify_failure(evidence()) == (PollOutcome.ERROR, "timeout: no ismds responses")
+        assert classify_failure(evidence(), WANTED) == (
+            PollOutcome.ERROR,
+            "timeout: no ismds responses",
+        )
 
     def test_only_failed_responses(self) -> None:
         failed = CapturedResponse(f"{EVENT_API}/quickpicks?qty=2", 500, None)
 
-        assert classify_failure(evidence(failed)) == (
+        assert classify_failure(evidence(failed), WANTED) == (
             PollOutcome.ERROR,
             "timeout: no ismds data (1 failed responses)",
         )
@@ -455,6 +481,33 @@ class TestFetch:
         assert result is not None
         assert (result.outcome, result.detail) == (PollOutcome.ERROR, "missing quickpicks")
         assert [p.name[-24:] for p in settings.debug_dir.iterdir()] == ["-missing-quickpicks.json"]
+
+    def test_only_an_unwanted_qty_captured_is_missing_quickpicks(
+        self, settings: Settings, time: FakeTime
+    ) -> None:
+        qp1 = raw(empty_quickpicks(1, total=86))
+        launcher = FakeLauncher(
+            event_page(on_load=((1.0, raw(OFFER_FACETS)), (1.5, qp1)), dropdown={}), time
+        )
+
+        result = make_fetcher(settings, launcher, time).fetch()
+
+        assert result is not None
+        assert (result.outcome, result.detail) == (PollOutcome.ERROR, "missing quickpicks")
+        assert launcher.tabs[0].calls == ["goto", "select 2", "select 3"]
+        assert [p.name[-24:] for p in settings.debug_dir.iterdir()] == ["-missing-quickpicks.json"]
+
+    def test_sold_out_pairs_and_triples_are_ok(self, settings: Settings, time: FakeTime) -> None:
+        qp1, qp2, qp3 = (raw(empty_quickpicks(qty)) for qty in (1, 2, 3))
+        on_load = ((1.0, raw(OFFER_FACETS)), (1.5, qp1), (2.0, qp2))
+        launcher = FakeLauncher(event_page(on_load=on_load, dropdown={3: ((0.4, qp3),)}), time)
+
+        result = make_fetcher(settings, launcher, time).fetch()
+
+        assert result is not None
+        assert (result.outcome, result.detail) == (PollOutcome.OK, "")
+        inventory = parse_inventory(result.responses, settings.wanted_quantities)
+        assert (inventory.primary, inventory.inferred_quantities) == ((), frozenset())
 
     def test_navigation_error(self, settings: Settings, time: FakeTime) -> None:
         script = event_page(navigation_error="Page.goto: net::ERR_NAME_NOT_RESOLVED\nlog")

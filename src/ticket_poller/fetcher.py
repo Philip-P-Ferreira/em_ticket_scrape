@@ -194,10 +194,15 @@ def block_signals(evidence: PageEvidence) -> list[str]:
     return signals
 
 
-def classify_failure(evidence: PageEvidence) -> tuple[PollOutcome, str]:
-    """OK with offer facets and quickpicks; otherwise BLOCKED or ERROR (data present wins)."""
+def classify_failure(evidence: PageEvidence, wanted: frozenset[int]) -> tuple[PollOutcome, str]:
+    """OK with offer facets and quickpicks; otherwise BLOCKED or ERROR (data present wins).
+
+    Only quickpicks for a ``wanted`` quantity count (an empty one is fine: sold out), since
+    others are not parsed. A missing wanted quantity is the parser's degraded warning.
+    """
     responses = evidence.responses
-    has_offers, has_quickpicks = has_offer_facets(responses), bool(captured_quantities(responses))
+    has_offers = has_offer_facets(responses)
+    has_quickpicks = not captured_quantities(responses).isdisjoint(wanted)
     if has_offers and has_quickpicks:
         return PollOutcome.OK, ""
     if any(_has_data(r) for r in responses):
@@ -356,7 +361,7 @@ class PlaywrightFetcher:
             responses=responses,
             blocklisted=self._blocklisted or _blocklisted(document),
         )
-        outcome, detail = classify_failure(evidence)
+        outcome, detail = classify_failure(evidence, settings.wanted_quantities)
         if outcome is not PollOutcome.OK:
             try_write_dump(self._settings, detail, responses, html=html, title=title)
         return FetchResult(
