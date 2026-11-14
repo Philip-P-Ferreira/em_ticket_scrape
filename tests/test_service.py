@@ -398,7 +398,7 @@ def test_pair_upgraded_to_a_triple_alerts_once_more(make_service: ServiceFactory
 def test_listing_back_after_24h_absence_alerts_again(
     make_service: ServiceFactory, absent_hours: int, alerts: int
 ) -> None:
-    svc = make_service(NK, seats(([7, 8], 2)), NK)
+    svc = make_service(NK, seats(([7, 8], 2), ([], 3)), NK)
 
     svc.poll()
     svc.clock.advance(5 * 60)
@@ -410,10 +410,13 @@ def test_listing_back_after_24h_absence_alerts_again(
     assert len(nk_alerts) == alerts
 
 
-RESALE_L1 = fetched(facets([make_resale_offer("L1")]), resale_eligible=True)
-RESALE_MISSING = fetched(facets([]), resale_eligible=True)
+NO_PRIMARY = (quickpicks(2, []), quickpicks(3, []))
+RESALE_L1 = fetched(facets([make_resale_offer("L1")]), *NO_PRIMARY, resale_eligible=True)
+RESALE_MISSING = fetched(facets([]), *NO_PRIMARY, resale_eligible=True)
 RESALE_NONE = fetched(
-    replace(facets([]), url=facets([]).url + "&includeResale=true"), resale_eligible=True
+    replace(facets([]), url=facets([]).url + "&includeResale=true"),
+    *NO_PRIMARY,
+    resale_eligible=True,
 )
 
 

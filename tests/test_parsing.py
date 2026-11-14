@@ -120,11 +120,12 @@ def test_nk_qty2_and_qty3_merge_into_the_design_table() -> None:
     assert inventory.warnings == ()
 
 
-def test_missing_qty3_payload_is_inferred_from_max_quantity_with_a_warning() -> None:
+def test_missing_qty3_payload_is_inferred_from_max_quantity_and_degraded() -> None:
     inventory = nk("quickpicks_qty2")
 
     assert inventory.inferred_quantities == {3}
     assert inventory.warnings == ("no quickpicks for qty=3; inferred from maxQuantity",)
+    assert inventory.degraded == inventory.warnings
     buyable = {(lst.section, lst.row): lst.buyable_quantities for lst in inventory.primary}
     assert buyable == {
         ("104", "R"): {2},
@@ -134,6 +135,36 @@ def test_missing_qty3_payload_is_inferred_from_max_quantity_with_a_warning() -> 
         ("103", "M"): {2},
         ("126", "J"): {2},
     }
+
+
+def single_seats(*seats: int, max_quantity: int = 3, total: int | None = None) -> CapturedResponse:
+    """The page's own ``qty=1`` quickpicks: one single-seat group per pick."""
+    picks = [make_pick(make_group([seat]), max_quantity=max_quantity) for seat in seats]
+    return quickpicks(1, picks, [make_offer()], total=total)
+
+
+def test_quickpicks_for_an_unwanted_qty_are_ignored() -> None:
+    pair = quickpicks(2, [make_pick(make_group([1, 2]))], [make_offer()])
+    singles = single_seats(1, 2, 5, 9, total=86)
+
+    inventory = parse_inventory([pair, singles, quickpicks(3, [])], BOTH)
+
+    assert [(lst.seats, lst.buyable_quantities) for lst in inventory.primary] == [
+        ("1\u20132", frozenset({2}))
+    ]
+    assert inventory.inferred_quantities == frozenset()
+    assert (inventory.warnings, inventory.degraded) == ((), ())
+
+
+def test_unwanted_qty_single_seats_are_not_inferred_as_a_wanted_qty() -> None:
+    pair = quickpicks(2, [make_pick(make_group([1, 2]), max_quantity=3)], [make_offer()])
+
+    inventory = parse_inventory([pair, single_seats(5, 6, 7, 9)], BOTH)
+
+    assert [(lst.seats, lst.buyable_quantities) for lst in inventory.primary] == [
+        ("1\u20132", frozenset({2, 3}))
+    ]
+    assert inventory.inferred_quantities == {3}
 
 
 def test_inference_requires_the_offer_to_sell_that_quantity() -> None:

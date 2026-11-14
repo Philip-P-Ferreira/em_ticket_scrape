@@ -345,6 +345,8 @@ class PlaywrightFetcher:
                     return None
             if self._wait_until(tab, lambda: False, settings.capture_settle_seconds) is None:
                 return None
+            if unwanted := self._quantities() - settings.wanted_quantities:
+                log.info("page also fetched quickpicks for qty=%s (ignored)", _qty_list(unwanted))
 
         responses = tuple(self._responses)
         html, title = tab.content(), tab.title()
@@ -415,6 +417,10 @@ class PlaywrightFetcher:
             resale_eligible=None,
             elapsed_s=self._monotonic() - started,
         )
+
+
+def _qty_list(quantities: Iterable[int]) -> str:
+    return ",".join(map(str, sorted(quantities)))
 
 
 def _blocklisted(response: RawResponse | None) -> bool:

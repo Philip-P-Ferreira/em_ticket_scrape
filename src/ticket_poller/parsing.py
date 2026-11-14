@@ -1,7 +1,8 @@
 """Pure parsing of captured ismds JSON into an :class:`Inventory` (design §4 and §7).
 
-Primary listings come only from quickpicks: each ``offerGroups`` entry is a seat group
-buyable as exactly the payload's ``qty``. Groups under the same offer whose places
+Primary listings come only from quickpicks of a wanted ``qty``: each ``offerGroups`` entry
+is a seat group buyable as exactly that ``qty``. Payloads for other quantities (the page
+sometimes fetches ``qty=1`` on its own) are ignored. Groups under the same offer whose places
 overlap or nest are merged into one canonical listing; disjoint groups stay separate.
 Resale listings come from any body's ``_embedded.offer``, de-duplicated by ``listingId``.
 """
@@ -119,7 +120,9 @@ def parse_inventory(responses: Iterable[CapturedResponse], wanted: frozenset[int
     """Parse every captured 200 JSON body into primary and resale listings.
 
     Raises :class:`ParseError` only for structurally invalid payloads; recoverable
-    oddities (missing offers, truncation, inferred quantities) become warnings.
+    oddities (missing offers, truncation, inferred quantities) become warnings. A wanted
+    quantity without quickpicks is also degraded: the ``maxQuantity`` fallback cannot see
+    groups that are offered only as that quantity.
     """
     captured = [(r.url, r.body) for r in responses if r.status == 200 and r.body is not None]
     warnings: list[str] = []
@@ -139,12 +142,17 @@ def parse_inventory(responses: Iterable[CapturedResponse], wanted: frozenset[int
         if qty is None:
             warnings.append("quickpicks response without a qty parameter ignored")
             continue
+        if qty not in wanted:
+            continue  # e.g. the page's own qty=1 request: its single seats are not buyable as 2+
         quickpick_qtys.add(qty)
         groups.extend(_quickpick_groups(body, qty, offers, warnings, degraded))
 
     inferred = wanted - quickpick_qtys
     for qty in sorted(inferred):
-        warnings.append(f"no quickpicks for qty={qty}; inferred from maxQuantity")
+        # Degraded: groups offered only as this qty never show up in the other payloads.
+        warning = f"no quickpicks for qty={qty}; inferred from maxQuantity"
+        warnings.append(warning)
+        degraded.append(warning)
     primary = tuple(
         _primary_listing(_infer_quantities(group, inferred, offers[group.offer_id]), offers)
         for group in merge_seat_groups(groups)

@@ -106,9 +106,12 @@ class TestPreview:
             "   Why: ≤ $350 per ticket · would alert: email, push",
         ]
 
-    def test_inferred_qty3_is_reported(self, settings: Settings) -> None:
-        report = render_report(preview(settings, fetched(*PRIMARY)), settings)
+    def test_inferred_qty3_is_a_degraded_partial_poll(self, settings: Settings) -> None:
+        found = preview(settings, fetched(*PRIMARY))
+        report = render_report(found, settings)
 
+        assert found.outcome is PollOutcome.PARTIAL
+        assert found.detail == "parse degraded: no quickpicks for qty=3; inferred from maxQuantity"
         assert "quickpicks: qty 2 captured, qty 3 inferred from maxQuantity" in report
         assert "warning: no quickpicks for qty=3; inferred from maxQuantity" in report
 

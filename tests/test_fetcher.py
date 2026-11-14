@@ -347,6 +347,24 @@ class TestFetch:
         inventory = parse_inventory(result.responses, settings.wanted_quantities)
         assert inventory.inferred_quantities == frozenset({3})
 
+    def test_page_fetched_unwanted_qty_is_captured_logged_and_not_parsed(
+        self, settings: Settings, time: FakeTime, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        assert QP3.body is not None
+        qp1 = CapturedResponse(QP3.url.replace("qty=3", "qty=1"), 200, {**QP3.body, "total": 86})
+        launcher = FakeLauncher(event_page(dropdown={3: ((0.4, raw(QP3)), (0.6, raw(qp1)))}), time)
+        caplog.set_level(logging.INFO, logger="ticket_poller.fetcher")
+
+        result = make_fetcher(settings, launcher, time).fetch()
+
+        assert result is not None
+        assert result.outcome is PollOutcome.OK
+        assert urls(result) == [OFFER_FACETS.url, QP2.url, QP3.url, qp1.url]
+        assert "page also fetched quickpicks for qty=1 (ignored)" in caplog.text
+        inventory = parse_inventory(result.responses, settings.wanted_quantities)
+        assert len(inventory.primary) == 6
+        assert (inventory.warnings, inventory.degraded) == ((), ())
+
     def test_dropdown_without_quickpicks_falls_back(
         self, settings: Settings, time: FakeTime, caplog: pytest.LogCaptureFixture
     ) -> None:

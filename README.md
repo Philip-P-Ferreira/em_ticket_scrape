@@ -130,8 +130,10 @@ Never delete the profile's `Singleton*` files.
 - **"email delivery failing" push**: check `SENDER_APP_PASSWORD` (Gmail revokes App
   Passwords when the account password changes), then `uv run ticket-poller test-notify`.
 - **"canary DEGRADED … parse warnings (N degraded)"**: Ticketmaster's JSON changed shape
-  enough to lose data; the `parse warning` lines in the journal say which part. Warnings
-  without degraded polls only show on the canary's `Parser:` line.
+  enough to lose data, or the quantity dropdown stopped working (`no quickpicks for qty=3;
+  inferred from maxQuantity`: such polls are PARTIAL, since seats offered only as 3 are
+  invisible to the fallback); the `parse warning` lines in the journal say which part.
+  Warnings without degraded polls only show on the canary's `Parser:` line.
 - **exit 75 / "another poller is running"**: stop the service before `poll-once`.
 - **ntfy push on iOS only shows after opening the app**: subscribe on the default
   `ntfy.sh` server (not a custom server URL); if it still only updates on refresh,
