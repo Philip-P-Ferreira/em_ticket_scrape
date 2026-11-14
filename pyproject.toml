@@ -1,0 +1,62 @@
+[project]
+name = "ticket-poller"
+version = "0.1.0"
+description = "Ticketmaster availability poller for one event, with email and ntfy alerts"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "httpx>=0.28",
+    "playwright>=1.55",
+    "pydantic>=2.12",
+    "pydantic-settings>=2.11",
+]
+
+[project.scripts]
+ticket-poller = "ticket_poller.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.13,<0.14"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "mypy>=1.18",
+    "pytest>=8.4",
+    "ruff>=0.14",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E", "W", "F",  # pycodestyle, pyflakes
+    "I",            # isort
+    "UP",           # pyupgrade
+    "B",            # bugbear
+    "C4",           # comprehensions
+    "SIM",          # simplify
+    "N",            # naming
+    "PT",           # pytest style
+    "PTH",          # pathlib
+    "RET",          # returns
+    "RUF",
+]
+
+[tool.mypy]
+strict = true
+python_version = "3.13"
+mypy_path = "src"
+plugins = ["pydantic.mypy"]
+
+[tool.pydantic-mypy]
+init_forbid_extra = true
+init_typed = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = ["-ra", "--strict-markers", "--strict-config"]
+xfail_strict = true
+filterwarnings = ["error"]
