@@ -26,7 +26,7 @@ from ticket_poller.models import (
 type Json = Mapping[str, Any]
 
 EN_DASH: Final = "\u2013"
-_RESALE_QUERY: Final = re.compile(r'inventorytypes\s*:\s*"?resale\b', re.IGNORECASE)
+_RESALE_QUERY: Final = re.compile(r"""inventorytypes\s*:\s*\(?\s*["']?resale\b""", re.IGNORECASE)
 
 
 class ParseError(ValueError):
@@ -167,35 +167,64 @@ def _quickpick_groups(
 
     groups: list[SeatGroup] = []
     for raw_pick in picks:
-        pick = _mapping(raw_pick, "quickpicks pick")
-        section, row = _str(pick, "section"), _opt_str(pick, "row")
+        try:
+            pick = _mapping(raw_pick, "quickpicks pick")
+            section, row = _str(pick, "section"), _opt_str(pick, "row")
+            raw_groups = _list(pick, "offerGroups")
+        except ParseError as error:
+            warnings.append(f"malformed quickpicks pick skipped: {error}")
+            continue
         max_quantity = pick.get("maxQuantity")
-        for raw_group in _list(pick, "offerGroups"):
-            offer_group = _mapping(raw_group, "quickpicks offerGroup")
-            offer_ids = _str_list(offer_group, "offers")
-            known = [offer_id for offer_id in offer_ids if offer_id in offers]
-            if not known:
-                warnings.append(f"quickpicks offer missing for {section} {row}; group skipped")
-                continue
-            offer_id = next((o for o in known if _is_buyable_primary(offers[o])), None)
-            if offer_id is None:
-                continue
-            places = frozenset(_str_list(offer_group, "places"))
-            if not places:
-                warnings.append(f"quickpicks group without places for {section} {row}; skipped")
-                continue
-            groups.append(
-                SeatGroup(
-                    offer_id=offer_id,
+        for raw_group in raw_groups:
+            try:
+                group = _seat_group(
+                    raw_group,
                     section=section,
                     row=row,
-                    places=places,
-                    seats=frozenset(_str_list(offer_group, "seats")),
-                    quantities=frozenset({qty}),
+                    qty=qty,
                     max_quantity=max_quantity if _is_int(max_quantity) else None,
+                    offers=offers,
+                    warnings=warnings,
                 )
-            )
+            except ParseError as error:
+                warnings.append(f"malformed quickpicks group for {section} {row} skipped: {error}")
+                continue
+            if group is not None:
+                groups.append(group)
     return groups
+
+
+def _seat_group(
+    raw_group: object,
+    *,
+    section: str,
+    row: str,
+    qty: int,
+    max_quantity: int | None,
+    offers: Mapping[str, Json],
+    warnings: list[str],
+) -> SeatGroup | None:
+    offer_group = _mapping(raw_group, "quickpicks offerGroup")
+    known = [o for o in _str_list(offer_group, "offers") if o in offers]
+    if not known:
+        warnings.append(f"quickpicks offer missing for {section} {row}; group skipped")
+        return None
+    offer_id = next((o for o in known if _is_buyable_primary(offers[o])), None)
+    if offer_id is None:
+        return None
+    places = frozenset(_str_list(offer_group, "places"))
+    if not places:
+        warnings.append(f"quickpicks group without places for {section} {row}; skipped")
+        return None
+    return SeatGroup(
+        offer_id=offer_id,
+        section=section,
+        row=row,
+        places=places,
+        seats=frozenset(_str_list(offer_group, "seats")),
+        quantities=frozenset({qty}),
+        max_quantity=max_quantity,
+    )
 
 
 def _infer_quantities(group: SeatGroup, missing: frozenset[int], offer: Json) -> SeatGroup:
@@ -227,7 +256,7 @@ def _primary_listing(group: SeatGroup, offers: Mapping[str, Json]) -> Listing:
 def _resale_listings(offers: Iterable[Json], warnings: list[str]) -> tuple[Listing, ...]:
     listings: dict[str, Listing] = {}
     for offer in offers:
-        inventory_type = offer.get("inventoryType")
+        inventory_type = offer.get("inventoryType", InventoryType.PRIMARY)
         if inventory_type == InventoryType.RESALE:
             if _is_buyable(offer):
                 listing = _resale_listing(offer)

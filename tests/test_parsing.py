@@ -335,6 +335,68 @@ def test_resale_facets_without_offers_add_a_warning() -> None:
     assert inventory.warnings == ("resale facets seen without resale offers",)
 
 
+@pytest.mark.parametrize(
+    ("bad_pick", "warning"),
+    [
+        pytest.param(
+            {"row": "N", "offerGroups": [make_group([3, 4])]},
+            "malformed quickpicks pick skipped: 'section': expected a non-empty string, got None",
+            id="pick-without-section",
+        ),
+        pytest.param(
+            make_pick({"offers": ["OFFER1"], "seats": ["3", "4"]}),
+            "malformed quickpicks group for 101 N skipped: 'places': expected a list, got NoneType",
+            id="group-without-places",
+        ),
+        pytest.param(
+            make_pick({"offers": ["OFFER1"], "places": [1], "seats": []}),
+            "malformed quickpicks group for 101 N skipped: 'places': expected a list of strings",
+            id="places-not-strings",
+        ),
+    ],
+)
+def test_malformed_pick_or_group_is_skipped_with_a_warning(
+    bad_pick: dict[str, object], warning: str
+) -> None:
+    picks = [bad_pick, make_pick(make_group([1, 2]))]
+
+    inventory = parse_inventory([quickpicks(2, picks, [make_offer()])], frozenset({2}))
+
+    assert [lst.seats for lst in inventory.primary] == ["1\u20132"]
+    assert inventory.warnings == (warning,)
+
+
+def test_protected_and_offline_resale_offers_are_skipped() -> None:
+    offers = [
+        make_resale_offer("P", protected=True),
+        make_resale_offer("OFF", online=False),
+        make_resale_offer("OK"),
+    ]
+
+    inventory = parse_inventory([facets(offers)], frozenset())
+
+    assert [lst.identity for lst in inventory.resale] == ["resale:OK"]
+    assert inventory.warnings == ()
+
+
+def test_offer_without_inventory_type_is_primary_without_a_warning() -> None:
+    offer = {k: v for k, v in make_offer().items() if k != "inventoryType"}
+    pick = make_pick(make_group([1, 2]))
+
+    inventory = parse_inventory([quickpicks(2, [pick], [offer])], frozenset({2}))
+
+    assert len(inventory.primary) == 1
+    assert inventory.warnings == ()
+
+
+def test_resale_facets_without_parsed_offers_leave_capture_missing() -> None:
+    response = facets(facet_list=[{"inventoryTypes": ["resale"], "count": 2}])
+
+    inventory = parse_inventory([response], BOTH)
+
+    assert resale_capture(inventory, eligible=True) is ResaleCapture.MISSING
+
+
 PAIR = make_pick(make_group([1, 2]))
 
 
@@ -342,12 +404,6 @@ PAIR = make_pick(make_group([1, 2]))
     ("picks", "offers"),
     [
         pytest.param("nope", [make_offer()], id="picks-not-a-list"),
-        pytest.param([{"row": "N", "offerGroups": []}], [], id="pick-without-section"),
-        pytest.param(
-            [make_pick({"offers": ["OFFER1"], "places": [1], "seats": []})],
-            [make_offer()],
-            id="places-not-strings",
-        ),
         pytest.param([], "nope", id="offers-not-a-list"),
         pytest.param([PAIR], [make_offer(listPrice=None)], id="offer-without-price"),
         pytest.param([PAIR], [make_offer(listPrice=True)], id="boolean-price"),
@@ -398,6 +454,9 @@ def test_nk_urls_do_not_request_resale() -> None:
         "https://offeradapter.ticketmaster.com/api/ismds/event/E/facets?q=available",
         "https://services.ticketmaster.com/api/ismds/event/E/quickpicks?qty=2&includeResale=true",
         "https://services.ticketmaster.com/api/ismds/event/E/facets?q=and%28available%2C+inventorytypes%3A%22resale%22%29",
+        "https://services.ticketmaster.com/api/ismds/event/E/facets?q=inventorytypes%3A%27resale%27",
+        "https://services.ticketmaster.com/api/ismds/event/E/facets?q=inventorytypes%3A%28%27resale%27%29",
+        "https://services.ticketmaster.com/api/ismds/event/E/facets?q=inventorytypes%3A+%28+%22resale%22%29",
     ],
 )
 def test_resale_requested(url: str) -> None:
