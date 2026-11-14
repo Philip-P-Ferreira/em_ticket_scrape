@@ -107,15 +107,15 @@ class TestParsing:
     def test_comma_separated_lists(self, make_env_file: EnvFileFactory) -> None:
         settings = load_settings(
             make_env_file(
-                WANTED_QUANTITIES=" 2, 3 ,4",
-                PREFERRED_QUANTITIES="3,4",
+                WANTED_QUANTITIES=" 2, 3 ",
+                PREFERRED_QUANTITIES="3,2",
                 ALERT_RECIPIENTS="a@example.com, b@example.org",
                 BROWSER_EXTRA_ARGS="--ozone-platform=x11,--lang=en-US",
             )
         )
 
-        assert settings.wanted_quantities == frozenset({2, 3, 4})
-        assert settings.preferred_quantities == frozenset({3, 4})
+        assert settings.wanted_quantities == frozenset({2, 3})
+        assert settings.preferred_quantities == frozenset({2, 3})
         assert settings.alert_recipients == ("a@example.com", "b@example.org")
         assert settings.browser_extra_args == ("--ozone-platform=x11", "--lang=en-US")
 
@@ -174,9 +174,11 @@ class TestValidation:
     @pytest.mark.parametrize(
         ("overrides", "problem"),
         [
-            ({"PREFERRED_QUANTITIES": "4"}, "subset"),
-            ({"WANTED_QUANTITIES": "0,2"}, "between 1 and 8"),
-            ({"WANTED_QUANTITIES": "2,9"}, "between 1 and 8"),
+            ({"WANTED_QUANTITIES": "2", "PREFERRED_QUANTITIES": "3"}, "subset"),
+            ({"WANTED_QUANTITIES": "0,2"}, "only quantities 2 and 3 are supported"),
+            ({"WANTED_QUANTITIES": "2,4"}, "only quantities 2 and 3 are supported"),
+            ({"WANTED_QUANTITIES": "1"}, "only quantities 2 and 3 are supported"),
+            ({"PREFERRED_QUANTITIES": "4"}, "only quantities 2 and 3 are supported"),
             ({"WANTED_QUANTITIES": ","}, "at least one quantity"),
             ({"WANTED_QUANTITIES": ""}, "at least one quantity"),
             ({"ALERT_RECIPIENTS": ""}, "at least one recipient"),

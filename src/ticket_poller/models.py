@@ -8,7 +8,10 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from decimal import Decimal
 from enum import IntEnum, StrEnum
-from typing import Any
+from typing import Any, Final
+
+SUPPORTED_QUANTITIES: Final = frozenset({2, 3})
+"""Purchase sizes the poller can watch: the price history has columns for these only."""
 
 
 class InventoryType(StrEnum):

@@ -21,9 +21,10 @@ WorkingDirectory=%h/repos/em_ticket_scrape
 # The app reads ./.env itself (with its owner/0600 check), so no EnvironmentFile=.
 # The .venv entry point is run directly, not `uv run`: no sync/resolve or network at
 # startup, no uv on PATH needed, and no extra process between systemd and Python.
-# systemd-inhibit holds a sleep+idle block lock for as long as the poller runs (KDE
-# PowerDevil must not suspend the PC); the lock is released when the process exits.
-ExecStart=/usr/bin/systemd-inhibit --what=sleep:idle --who=ticket-poller "--why=Polling Ticketmaster" --mode=block \
+# systemd-inhibit holds a sleep block lock for as long as the poller runs (KDE PowerDevil
+# must not suspend the PC); the lock is released when the process exits. Not "idle": on
+# Plasma that would also stop the screen from dimming and the monitor from powering off.
+ExecStart=/usr/bin/systemd-inhibit --what=sleep --who=ticket-poller "--why=Polling Ticketmaster" --mode=block \
           %h/repos/em_ticket_scrape/.venv/bin/ticket-poller run
 # systemd-inhibit does not forward SIGTERM, so the helper signals the poller directly
 # and waits for its clean shutdown (≈30 s worst case); systemd-inhibit then exits with

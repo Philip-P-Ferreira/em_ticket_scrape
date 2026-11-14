@@ -60,9 +60,9 @@ deploy/install.sh --uninstall              # disable, stop and remove the unit (
   session's display. `loginctl enable-linger` is not needed and doesn't help: with no session
   there is no display. For unattended reboots use SDDM autologin plus lock-on-login
   (Chromium keeps rendering while the screen is locked).
-- **blocks suspend and idle sleep while it runs**, via
-  `systemd-inhibit --what=sleep:idle --mode=block` around the poller. The lock is released
-  automatically when the service stops. Check it with `systemd-inhibit --list`.
+- **blocks suspend while it runs**, via `systemd-inhibit --what=sleep --mode=block` around
+  the poller (not `idle`, so the screen still dims and the monitor still powers off). The
+  lock is released automatically when the service stops. Check it with `systemd-inhibit --list`.
 - runs `.venv/bin/ticket-poller run` directly (no `uv run`, so no network at startup) and
   reads `.env` itself from the repo directory.
 - stops cleanly within `TimeoutStopSec=45`: `deploy/stop-poller.sh` sends SIGTERM to the

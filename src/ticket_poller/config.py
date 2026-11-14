@@ -36,12 +36,13 @@ from pydantic import (
 )
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
+from ticket_poller.models import SUPPORTED_QUANTITIES
+
 log = logging.getLogger(__name__)
 
 ENV_FILE_VAR: Final = "ENV_FILE"
 DEFAULT_ENV_FILE: Final = Path(".env")
 MIN_SECRET_LENGTH: Final = 6
-MAX_QUANTITY: Final = 8
 PRIVATE_DIR_MODE: Final = 0o700
 PRIVATE_UMASK: Final = 0o077
 
@@ -340,8 +341,9 @@ def _check_email(value: str) -> str:
 
 
 def _check_quantities(value: frozenset[int]) -> frozenset[int]:
-    if not all(1 <= quantity <= MAX_QUANTITY for quantity in value):
-        raise ValueError(f"quantities must be between 1 and {MAX_QUANTITY}")
+    if not value <= SUPPORTED_QUANTITIES:
+        supported = " and ".join(str(q) for q in sorted(SUPPORTED_QUANTITIES))
+        raise ValueError(f"only quantities {supported} are supported (price history stores those)")
     return value
 
 
