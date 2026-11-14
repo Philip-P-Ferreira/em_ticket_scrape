@@ -97,6 +97,11 @@ def resale_requested(urls: Iterable[str]) -> bool:
     return any(_requests_resale(url) for url in urls)
 
 
+def quickpicks_qty(url: str) -> int | None:
+    """The ``qty`` a quickpicks request asked for; None for other URLs or no usable qty."""
+    return _qty_param(url) if _is_quickpicks(url) else None
+
+
 def resale_capture(inventory: Inventory, eligible: bool | None) -> ResaleCapture:
     """The poll's resale-capture status from the page's eligibility flag (design §7).
 

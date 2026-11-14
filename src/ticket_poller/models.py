@@ -156,3 +156,4 @@ class FetchResult:
     detail: str
     resale_eligible: bool | None
     elapsed_s: float
+    browser_recycled: bool = False
