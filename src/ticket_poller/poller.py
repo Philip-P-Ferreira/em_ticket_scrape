@@ -41,6 +41,7 @@ from ticket_poller.schedule import (
     PollTiming,
     canary_due,
     event_over,
+    failure_delay,
     next_canary_at,
     next_wake,
     outage_deadline,
@@ -154,46 +155,49 @@ class Poller:
 
     def run(self) -> ExitReason:
         """Poll until the auto-stop time or a stop request; notices wake the loop on time."""
-        self._next_poll = self._clock.now()
+        self._next_poll = self._first_poll_at(self._clock.now())
         while not self._stop.is_set():
             now = self._clock.now()
             if event_over(now, self._settings.stop_after):
                 return self._finish()
             if now >= self._next_poll:
-                report = self._poll_safely()
+                report = self.poll_once()
                 if report is None:
                     break
                 self._next_poll = self._schedule_after(report)
-            self._send_due_notices(self._clock.now())
+                now = self._clock.now()
+            self._send_due_notices(now)
             wake = self._next_wake(now)
             if self._clock.wait((wake - self._clock.now()).total_seconds()):
                 break
         log.info("stop requested; shutting down")
         return ExitReason.SIGNAL
 
-    def _poll_safely(self) -> PollReport | None:
-        """``poll_once``, with any unexpected exception recorded as an ERROR poll."""
-        started = self._clock.now()
-        try:
-            return self.poll_once()
-        except Exception as exc:
-            log.exception("poll crashed")
-            detail = redact(f"crash: {type(exc).__name__}: {exc}", self._settings.secret_values())
-            elapsed = (self._clock.now() - started).total_seconds()
-            crashed = FetchResult(PollOutcome.ERROR, (), detail, None, elapsed)
-            return self._apply(self._report(started, crashed, PollOutcome.ERROR, detail))
+    def _first_poll_at(self, now: datetime) -> datetime:
+        """Now, unless a restart lands inside the persisted backoff of a failure streak."""
+        state = self._db.get_state()
+        last = self._db.recent_polls(1)
+        if state.consecutive_failures == 0 or not last or last[0].outcome in SUCCESS:
+            return now
+        outcome = last[0].outcome
+        delay = failure_delay(outcome, self._streak(state, outcome), self._timing)
+        resume = last[0].started_at + timedelta(seconds=delay)
+        if resume > now:
+            log.info("resuming the failure backoff: first poll at %s", resume.isoformat())
+        return max(now, resume)
 
     def _schedule_after(self, report: PollReport) -> datetime:
-        state = self._db.get_state()
-        streak = (
-            state.consecutive_blocks
-            if report.outcome is PollOutcome.BLOCKED
-            else state.consecutive_failures
-        )
+        streak = self._streak(self._db.get_state(), report.outcome)
         delay = poll_delay(report.outcome, streak, self._timing, self._rng)
         level = logging.INFO if report.succeeded else logging.WARNING
         log.log(level, "%s next=%s", poll_summary(report, self._ctx), _seconds_text(delay))
         return self._clock.now() + timedelta(seconds=delay)
+
+    @staticmethod
+    def _streak(state: RuntimeState, outcome: PollOutcome) -> int:
+        if outcome is PollOutcome.BLOCKED:
+            return state.consecutive_blocks
+        return state.consecutive_failures
 
     def _next_wake(self, now: datetime) -> datetime:
         state = self._db.get_state()
@@ -207,19 +211,25 @@ class Poller:
         )
 
     def _send_due_notices(self, now: datetime) -> None:
-        """Outage, recovery and canary; each is retried at later wakes until delivered."""
-        deadline = outage_deadline(self._db.get_state(), self._outage_after)
-        if deadline is not None and now >= deadline:
-            self._announce_outage(now)
-        if self._db.get_state().recovery_pending:
-            self._announce_recovery()
-        state = self._db.get_state()
-        if canary_due(now, state.last_canary_date, self._settings.tz, self._settings.canary_hour):
-            self._send_canary(now)
+        """Outage, recovery and canary; each is retried at later wakes until delivered.
+
+        A bug in one notice is logged and must not stop the others or the loop.
+        """
+        notices = (
+            ("outage", self._announce_outage),
+            ("recovery", self._announce_recovery),
+            ("canary", self._send_canary),
+        )
+        for name, send_if_due in notices:
+            try:
+                send_if_due(now)
+            except Exception:
+                log.exception("%s notice failed; retrying at a later wake", name)
 
     def _announce_outage(self, now: datetime) -> None:
         state = self._db.get_state()
-        if state.failure_started_at is None:
+        deadline = outage_deadline(state, self._outage_after)
+        if deadline is None or now < deadline or state.failure_started_at is None:
             return
         last = self._db.recent_polls(1)[0]
         notice = messages.outage(
@@ -233,13 +243,18 @@ class Poller:
         delivered = self._notify_admin(notice)
         self._db.save_state(self._db.get_state().record_outage_notice(delivered))
 
-    def _announce_recovery(self) -> None:
+    def _announce_recovery(self, _now: datetime) -> None:
         state = self._db.get_state()
+        if not state.recovery_pending:
+            return
         duration = timedelta(seconds=state.last_outage_duration_s or 0)
         delivered = self._notify_admin(messages.recovered(outage_duration=duration))
         self._db.save_state(self._db.get_state().record_recovery_notice(delivered))
 
     def _send_canary(self, now: datetime) -> None:
+        tz, hour = self._settings.tz, self._settings.canary_hour
+        if not canary_due(now, self._db.get_state().last_canary_date, tz, hour):
+            return
         email = messages.canary(canary_report(self._db, self._settings, now), self._ctx)
         delivery = self._notifier.send(
             NoticeKind.CANARY, to=[self._settings.admin_email], email=email
@@ -251,10 +266,13 @@ class Poller:
 
     def _finish(self) -> ExitReason:
         """The auto-stop time has passed: send the one-time finished notice and exit."""
-        if not self._db.get_state().finished_notice_sent and self._notify_admin(
-            messages.finished(ctx=self._ctx)
-        ):
-            self._db.save_state(replace(self._db.get_state(), finished_notice_sent=True))
+        try:
+            if not self._db.get_state().finished_notice_sent and self._notify_admin(
+                messages.finished(ctx=self._ctx)
+            ):
+                self._db.save_state(replace(self._db.get_state(), finished_notice_sent=True))
+        except Exception:
+            log.exception("finished notice failed")
         log.info("auto-stop time %s reached; exiting", self._settings.stop_after.isoformat())
         return ExitReason.EVENT_OVER
 
@@ -270,14 +288,34 @@ class Poller:
     def poll_once(self, *, dry_run: bool = False) -> PollReport | None:
         """Fetch and evaluate once; None if stop was requested mid-fetch (nothing is recorded).
 
-        A dry run only reads the store to label matches; it writes and sends nothing.
+        A live poll is committed before anything is sent; an unexpected exception before
+        that commit is recorded as an ERROR poll instead. A dry run only reads the store to
+        label matches; it writes and sends nothing.
         """
         started = self._clock.now()
-        result = self._fetcher.fetch()
-        if result is None:
-            return None
-        report = self._evaluate(started, result, dry_run=dry_run)
-        return report if dry_run else self._apply(report)
+        if dry_run:
+            result = self._fetcher.fetch()
+            return None if result is None else self._evaluate(started, result, dry_run=True)
+        try:
+            result = self._fetcher.fetch()
+            if result is None:
+                return None
+            report = self._evaluate(started, result, dry_run=False)
+            self._record(report)
+        except Exception as exc:  # nothing was committed: record the crash as this poll
+            report = self._crash_report(started, exc)
+            self._record(report)
+        if not report.succeeded:
+            self._fetcher.close()  # relaunch the browser on the next poll (§9.1)
+            return report
+        return self._act_on(report)
+
+    def _crash_report(self, started: datetime, exc: Exception) -> PollReport:
+        log.exception("poll crashed")
+        detail = redact(f"crash: {type(exc).__name__}: {exc}", self._settings.secret_values())
+        elapsed = (self._clock.now() - started).total_seconds()
+        crashed = FetchResult(PollOutcome.ERROR, (), detail, None, elapsed)
+        return self._report(started, crashed, PollOutcome.ERROR, detail)
 
     def _evaluate(self, started: datetime, result: FetchResult, *, dry_run: bool) -> PollReport:
         if result.outcome is not PollOutcome.OK:
@@ -344,8 +382,8 @@ class Poller:
             return {key for key, _ in keyed}
         return {key for key, _ in self._store.pending(keyed, channel, resolved)}
 
-    def _apply(self, report: PollReport) -> PollReport:
-        """Record a live poll and act on it: deliver, ping, resale notices or backoff."""
+    def _record(self, report: PollReport) -> None:
+        """Commit a live poll: observations, the poll row and the loop state, atomically."""
         store, findings, now = self._db, report.findings, report.started_at
         with store.transaction():
             if findings is not None:
@@ -359,12 +397,21 @@ class Poller:
             if findings is not None:
                 state = _track_resale(state, findings.capture, report.fetch.resale_eligible)
             store.save_state(state)
-        if not report.succeeded:
-            self._fetcher.close()  # relaunch the browser on the next poll (§9.1)
+
+    def _act_on(self, report: PollReport) -> PollReport:
+        """After a successful poll is committed: deliver, resale notices, then ping.
+
+        A failure here is logged, not recorded as another poll; owed alerts stay pending and
+        the missing ping lets healthchecks notice.
+        """
+        try:
+            report = self._deliver(report)
+            self._send_resale_notices(report)
+        except Exception:
+            log.exception("acting on the poll failed; owed alerts stay pending")
             return report
-        report = self._deliver(report)
-        self._pinger.ping()
-        self._send_resale_notices(report)
+        if not self._stop.is_set():
+            self._pinger.ping()
         return report
 
     def _deliver(self, report: PollReport) -> PollReport:

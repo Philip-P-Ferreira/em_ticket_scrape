@@ -16,7 +16,7 @@ from tests.builders import facets, load_captured, make_group, make_offer, make_p
 from tests.fake_clock import FakeClock
 from tests.fakes import FakeEmailSender, FakePinger, FakePushSender, ScriptedFetcher
 from tests.sample_env import EnvFileFactory
-from ticket_poller import fetcher, notify
+from ticket_poller import fetcher, messages, notify
 from ticket_poller.cli import ExitCode, main
 from ticket_poller.config import Settings, load_settings
 from ticket_poller.fetcher import Fetcher
@@ -461,3 +461,90 @@ def test_failed_poll_closes_the_browser_for_a_relaunch(make_service: ServiceFact
     svc.poll()
 
     assert svc.fetcher.closes == 1
+
+
+# --- robustness: bugs and restarts must not kill the loop or hammer the site ------------------
+
+
+def raise_bug(*args: object, **kwargs: object) -> Any:
+    raise RuntimeError("bug")
+
+
+def test_a_bug_after_the_commit_is_not_a_second_failed_poll(
+    make_service: ServiceFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    svc = make_service(NK)
+    monkeypatch.setattr(messages, "alert_email", raise_bug)
+
+    report = svc.poll()
+
+    assert report.outcome is PollOutcome.OK
+    assert [poll.outcome for poll in svc.store.recent_polls(10)] == [PollOutcome.OK]
+    assert svc.store.get_state().consecutive_failures == 0
+    assert svc.pinger.pings == 0
+    assert svc.fetcher.closes == 0
+    pending = svc.poll(dry_run=True).findings
+    assert pending is not None
+    assert {status.pending for status in pending.matches} == {frozenset(Channel)}
+
+
+def test_a_failing_notice_does_not_stop_the_loop(
+    make_service: ServiceFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    start = datetime(2026, 11, 14, 13, 58, tzinfo=UTC)  # 07:58 in Chicago
+    svc = make_service(NK, start=start)
+    monkeypatch.setattr(messages, "canary", raise_bug)
+
+    assert svc.run_for(minutes(12)) is ExitReason.SIGNAL
+
+    polls = [poll.started_at - start for poll in svc.store.recent_polls(10)]
+    assert sorted(polls) == [minutes(0), minutes(5), minutes(10)]
+    assert svc.store.get_state().last_canary_date is None
+
+
+def test_a_failing_finished_notice_still_exits_for_the_event(
+    make_service: ServiceFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    svc = make_service(NK, STOP_AFTER="2026-11-14T11:00:00+00:00")
+    monkeypatch.setattr(messages, "finished", raise_bug)
+
+    assert svc.poller.run() is ExitReason.EVENT_OVER
+    assert not svc.store.get_state().finished_notice_sent
+
+
+def test_a_restart_resumes_the_persisted_failure_backoff(make_service: ServiceFactory) -> None:
+    svc = make_service(BLOCKED, NK)
+    svc.poll()
+    svc.clock.advance(2 * 60)  # systemd restarts the crashed service
+
+    svc.run_for(minutes(16))
+
+    assert svc.poll_times() == [minutes(0), minutes(15)]
+
+
+def test_a_failed_notice_due_during_a_slow_poll_waits_for_the_next_wake(
+    make_service: ServiceFactory,
+) -> None:
+    def slow_block() -> FetchResult:
+        svc.clock.advance(20 * 60)  # 45 -> 65 min, past the 60-min outage deadline
+        return BLOCKED
+
+    svc = make_service(BLOCKED, BLOCKED, slow_block, BLOCKED)
+    attempts: list[timedelta] = []
+    svc.ops_push.on_send = lambda push: attempts.append(svc.minutes())
+    svc.email.fail = svc.ops_push.fail = True
+
+    svc.run_for(minutes(130))
+
+    assert svc.poll_times() == [minutes(m) for m in (0, 15, 45, 125)]
+    assert attempts == [minutes(65), minutes(120), minutes(125)]  # wakes: canary, poll
+
+
+def test_no_healthchecks_ping_once_stop_is_requested(make_service: ServiceFactory) -> None:
+    svc = make_service(NK)
+    svc.alert_push.on_send = lambda push: svc.clock.stop.set()
+
+    svc.poll()
+
+    assert svc.alert_push.sent
+    assert svc.pinger.pings == 0
