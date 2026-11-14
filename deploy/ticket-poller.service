@@ -1,0 +1,63 @@
+# systemd user unit for the Ticketmaster poller (design §16).
+# Installed by deploy/install.sh into ~/.config/systemd/user/; that script rewrites the
+# repo paths below if the checkout is not at ~/repos/em_ticket_scrape.
+
+[Unit]
+Description=Ticketmaster poller (Noah Kahan, 2027-04-27)
+Documentation=file://%h/repos/em_ticket_scrape/README.md
+# Headed Chromium needs the desktop session: start with it, stop at logout.
+# KDE imports DISPLAY/WAYLAND_DISPLAY/XAUTHORITY/XDG_RUNTIME_DIR into the user manager
+# before this target is reached, so the unit inherits the current login's values.
+PartOf=graphical-session.target
+After=graphical-session.target
+# Fail visibly instead of looping on browser launch errors if there is no display env.
+AssertEnvironment=DISPLAY
+StartLimitIntervalSec=1h
+StartLimitBurst=20
+
+[Service]
+Type=exec
+WorkingDirectory=%h/repos/em_ticket_scrape
+# The app reads ./.env itself (with its owner/0600 check), so no EnvironmentFile=.
+# The .venv entry point is run directly, not `uv run`: no sync/resolve or network at
+# startup, no uv on PATH needed, and no extra process between systemd and Python.
+# systemd-inhibit holds a sleep+idle block lock for as long as the poller runs (KDE
+# PowerDevil must not suspend the PC); the lock is released when the process exits.
+ExecStart=/usr/bin/systemd-inhibit --what=sleep:idle --who=ticket-poller "--why=Polling Ticketmaster" --mode=block \
+          %h/repos/em_ticket_scrape/.venv/bin/ticket-poller run
+# systemd-inhibit does not forward SIGTERM, so the helper signals the poller directly
+# and waits for its clean shutdown (≈30 s worst case); systemd-inhibit then exits with
+# the poller's status, so the exit codes below still apply.
+ExecStop=%h/repos/em_ticket_scrape/deploy/stop-poller.sh
+# After a stop, SIGKILL anything left in the cgroup (e.g. an orphaned Chromium).
+KillMode=mixed
+TimeoutStopSec=45
+Environment=PYTHONUNBUFFERED=1
+UMask=0077
+
+# Exit codes: 0 = event over / signal (no restart), 1 = crash (restart),
+# 75 = instance lock held (restart after RestartSec), 78 = bad config or .env perms.
+Restart=on-failure
+RestartSec=60
+RestartPreventExitStatus=78
+
+# stdout/stderr go to the journal: journalctl --user -u ticket-poller
+SyslogIdentifier=ticket-poller
+
+# Background job: yield CPU/IO to the desktop.
+Nice=5
+IOSchedulingClass=best-effort
+IOSchedulingPriority=6
+
+# Hardening that Chromium tolerates (verified with the live tests in a transient unit).
+# Deliberately NOT set: MemoryDenyWriteExecute (V8 JIT), RestrictNamespaces (Chromium's
+# user-namespace sandbox), PrivateTmp (hides /tmp/.X11-unix), PrivateDevices (/dev/dri),
+# ProtectHome/ProtectSystem/PrivateUsers (profile, state and repo live in $HOME).
+NoNewPrivileges=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=graphical-session.target
