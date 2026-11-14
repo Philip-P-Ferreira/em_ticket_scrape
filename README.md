@@ -150,10 +150,14 @@ of the desktop, headed under a virtual display (Xvfb). `deploy/nas/` holds that 
   clears a stale `/tmp/.X99-lock` of ours after a crash and holds the unit back until the
   display's socket exists.
 - `ticket-poller.service`: the desktop unit without the graphical session, `systemd-inhibit`
-  (Access denied on UGOS) or the `ExecStop` helper. It `Requires=` the Xvfb unit (stopping
-  or restarting Xvfb stops or restarts the poller, and so does an Xvfb crash), sets
-  `DISPLAY=:99` and `XAUTHORITY`, points `HOME` and `TMPDIR` at `.nas/home` and `.nas/tmp`
-  (Chromium and Playwright write there; the real ones are world-writable on UGOS), is
+  (Access denied on UGOS) or the `ExecStop` helper. It `Wants=` and is `PartOf=` the Xvfb
+  unit: stopping or restarting Xvfb (or an Xvfb crash) stops or restarts the poller, but a
+  failed Xvfb start doesn't keep it down (as `Requires=` would, for good): it starts anyway,
+  counts the missing display as failed polls (retried with backoff, admin alert) and
+  recovers once Xvfb's auto-restart succeeds. It sets `DISPLAY=:99` and `XAUTHORITY`,
+  points `HOME` and `TMPDIR` at `.nas/home` and `.nas/tmp` (Chromium and Playwright write
+  there; UGOS creates dirs in the real home 0777, and `/tmp` is shared), warns in the
+  journal at each start if the home dirs are writable by others again (see below), is
   capped at `MemoryHigh=1.5G` / `MemoryMax=2.5G` and is `WantedBy=default.target`.
 - `run.sh`: runs a `ticket-poller` command by hand in the service's environment.
 - `ticket-poller-failure.service` is the desktop one, unchanged.
@@ -166,8 +170,24 @@ Chrome for Testing, matching `playwright` in `uv.lock`) and `xvfb/root/usr/bin/X
 `push.sh` never overwrites `.nas`, `.venv`, `.env` or the state dir; `install.sh` only
 syncs `.venv` and creates `.nas/home` and `.nas/tmp`.
 
-`$HOME` on UGOS is world-writable, so the project dir is kept 0700 and the state and profile
-live inside it. `.env` on the NAS is the desktop one plus these overrides (absolute paths:
+UGOS creates `$HOME`, `~/repos` and new dirs in them 0777 with no sticky bit, as `ls -l`
+shows them (the home also carries a UGOS ACL, the `system.ugacl_self` xattr enforced by the
+`ugacl_vfs` kernel module, whose effect on other uids can't be checked without root). A
+0700 project dir alone doesn't help there: anyone who can write to its parent can rename it
+away and put their own code in its place, and likewise `~/.config` and the units. So
+`install.sh` runs `chmod go-w` on every dir **below** `$HOME` down to the project and
+`~/.config/systemd/user` (making `~/repos`, `~/.config` and `~/.config/systemd` 0755),
+re-checks them and `$HOME` with `deploy/nas/check-perms.sh` and prints a loud warning for
+any that are still writable by others. The poller unit runs the same check at each start
+and logs a journal warning (it doesn't refuse to start, which would crash-loop the poller).
+
+`$HOME` itself stays 0777 and is still flagged: `chmod go-w ~` on the NAS also removed the
+home's `system.ugacl_self` ACL, and the next SSH login with the (unchanged) key was refused.
+Samba doesn't need the 0777 (its `[personal_folder]` share, `path = %H`, serves each user
+their own home as that user) and the UGOS apps run as root, but UGOS evidently depends on
+that ACL: don't chmod `$HOME`. Until UGOS offers a safe way to close it, treat any other
+local account on the NAS as able to tamper with the poller. The project dir itself is 0700 and holds the `.env`, the state and the
+profile. `.env` on the NAS is the desktop one plus these overrides (absolute paths:
 the service's `HOME` is `.nas/home`, so `~` would point there):
 
 ```sh
@@ -201,8 +221,8 @@ There is no `uv` on the NAS PATH: use `deploy/nas/run.sh …` for the commands i
 `HOME` and `TMPDIR`). Like the desktop installer, `install.sh` is idempotent, never enables or
 starts anything, and should be re-run after every push. It checks that the in-project uv,
 Chromium (the revision `uv.lock`'s Playwright needs) and Xvfb exist and load all their
-libraries, warns about linger and the `.env` overrides, and tells you to restart the
-service if it is running.
+libraries, fixes the modes of the dirs below `$HOME` (above), warns about linger and the `.env` overrides,
+and tells you to restart the service if it is running.
 
 **Never run both hosts at once.** They poll from the same IP, which doubles the
 Ticketmaster traffic and sends duplicate alerts. Switch over in this order:
@@ -230,13 +250,15 @@ To move back, disable the NAS units (`systemctl --user disable --now ticket-poll
 ticket-poller-xvfb`) before enabling the desktop service again.
 
 **After every UGOS firmware update**, check that the system libraries Chromium and Xvfb link
-against are still there (re-running `deploy/nas/install.sh` does the same), and that linger
+against are still there, that the home dirs weren't made writable by others again
+(re-running `deploy/nas/install.sh` does both, and fixes the modes), and that linger
 survived (it lives in the overlay root fs):
 
 ```sh
 cd ~/repos/em_ticket_scrape
 ldd .nas/ms-playwright/chromium-1255/chrome-linux64/chrome | grep 'not found'   # no output = OK
 ldd .nas/xvfb/root/usr/bin/Xvfb | grep 'not found'
+deploy/nas/check-perms.sh ~ ~/repos/em_ticket_scrape ~/.config/systemd/user   # no output = OK
 loginctl show-user pferreira -p Linger
 ```
 

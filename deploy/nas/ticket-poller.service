@@ -6,9 +6,14 @@
 [Unit]
 Description=Ticketmaster poller (Noah Kahan, 2027-04-27), NAS
 Documentation=file://%h/repos/em_ticket_scrape/README.md
-# Headed Chromium draws on the Xvfb display. Requires= also stops this unit when Xvfb is
-# stopped, and restarts it when Xvfb restarts (also after an Xvfb crash).
-Requires=ticket-poller-xvfb.service
+# Headed Chromium draws on the Xvfb display. Wants=, not Requires=: with Requires= a failed
+# Xvfb start leaves this unit inactive (job result "dependency", no OnFailure=), and Xvfb's
+# later auto-restart only try-restarts it, which does nothing to an inactive unit. With
+# Wants= the poller starts anyway, counts the missing display as failed polls (retried with
+# backoff, admin alert) and recovers once Xvfb is up. PartOf= still stops/restarts it when
+# Xvfb is stopped/restarted, also after an Xvfb crash.
+Wants=ticket-poller-xvfb.service
+PartOf=ticket-poller-xvfb.service
 After=ticket-poller-xvfb.service
 StartLimitIntervalSec=1h
 StartLimitBurst=20
@@ -36,6 +41,10 @@ Environment=XAUTHORITY=%h/repos/em_ticket_scrape/.nas/xauthority
 Environment=HOME=%h/repos/em_ticket_scrape/.nas/home
 Environment=TMPDIR=%h/repos/em_ticket_scrape/.nas/tmp
 UMask=0077
+# $HOME and ~/repos are 0777 on UGOS: warn loudly in the journal if they (or the dirs down to
+# the project and unit dirs) are writable by others again, e.g. after a UGOS update. Only a
+# warning ("-"): a failing check would make the poller crash-loop.
+ExecStartPre=-%h/repos/em_ticket_scrape/deploy/nas/check-perms.sh --journal %h %h/repos/em_ticket_scrape %h/.config/systemd/user
 
 # Exit codes: 0 = event over / signal (no restart), 1 = crash or watchdog (restart),
 # 75 = instance lock held (restart after RestartSec), 78 = bad config, .env perms or an

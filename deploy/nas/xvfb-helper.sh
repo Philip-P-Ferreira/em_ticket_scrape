@@ -39,7 +39,8 @@ prepare)
     umask 077
     rm -f -- "$auth"
     : >"$auth"
-    xauth -q -f "$auth" add ":$display" MIT-MAGIC-COOKIE-1 "$(mcookie)"
+    # Via stdin: on xauth's command line the cookie would be readable in /proc/PID/cmdline.
+    xauth -q -f "$auth" source - <<<"add :$display MIT-MAGIC-COOKIE-1 $(mcookie)"
     ;;
 wait)
     for _ in $(seq 100); do

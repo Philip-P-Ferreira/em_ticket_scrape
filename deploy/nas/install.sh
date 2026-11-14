@@ -52,7 +52,7 @@ for tool in /usr/bin/xkbcomp /usr/bin/xauth /usr/bin/mcookie /usr/bin/ldd; do
     [[ -x $tool ]] || die "$tool is missing"
 done
 
-# $HOME is world-writable on UGOS: the project dir (with .env and state) must not be.
+# The project dir holds .env and the state: private (UGOS creates dirs 0777).
 # .nas/home and .nas/tmp are the service's private HOME and TMPDIR.
 chmod 700 -- "$ROOT"
 mkdir -p -- "$NAS/home" "$NAS/tmp"
@@ -95,13 +95,27 @@ done
 
 echo "==> Installing ${UNITS[*]} into $UNIT_DIR"
 mkdir -p -- "$UNIT_DIR"
-# UGOS makes new dirs under the world-writable $HOME world-writable too, whatever the
-# umask; nobody else may plant units here.
-dir=$UNIT_DIR
-while [[ $dir == "$HOME"/* ]]; do
-    if [[ -O $dir ]]; then chmod go-w -- "$dir"; fi
-    dir=${dir%/*}
+# UGOS creates $HOME, ~/repos and new dirs in them 0777 without a sticky bit, whatever the
+# umask: another uid could rename the project or unit dir away and plant code that runs as
+# us. Take group/other write off every dir below $HOME down to both. Not $HOME itself: on
+# UGOS a chmod of it also strips its UGOS ACL (system.ugacl_self), and SSH key login to the
+# NAS was refused right after that was done once (README: Running on the NAS).
+for path in "$ROOT" "$UNIT_DIR"; do
+    dir=$path
+    while [[ $dir == "$HOME"/* ]]; do
+        if [[ -O $dir ]]; then chmod go-w -- "$dir"; fi
+        dir=${dir%/*}
+    done
 done
+if ! "$ROOT/deploy/nas/check-perms.sh" "$HOME" "$ROOT" "$UNIT_DIR"; then
+    cat >&2 <<EOF
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+WARNING: the dirs above are writable by other users, who could replace the poller's code
+or units through them. This script fixes the dirs below \$HOME, not \$HOME itself: read
+the README (Running on the NAS) before changing \$HOME. Re-run after UGOS updates.
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+EOF
+fi
 staging=$UNIT_DIR/.ticket-poller-staging   # verify needs real unit file names
 mkdir -p -- "$staging"
 trap 'rm -rf -- "$staging"' EXIT
