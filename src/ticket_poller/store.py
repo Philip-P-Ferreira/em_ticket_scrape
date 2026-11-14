@@ -423,6 +423,17 @@ class Store:
                 [(key, channel.value, _ts(now), match.priority.value) for key, match in matches],
             )
 
+    def delivered_keys(self, keys: Iterable[str], channel: Channel) -> set[str]:
+        """The ``keys`` already delivered on ``channel``; a pending one among them is an upgrade."""
+        return {
+            key
+            for key in keys
+            if self._conn.execute(
+                "SELECT 1 FROM alert_deliveries WHERE dedup_key = ? AND channel = ?",
+                (key, channel.value),
+            ).fetchone()
+        }
+
     def _resolved(
         self, identity: str, row: _StoredListing | None, now: datetime, rearm_after: timedelta
     ) -> Resolved:

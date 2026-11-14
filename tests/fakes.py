@@ -1,4 +1,4 @@
-"""Test doubles for the browser seam (``BrowserTab``/``Launcher``) and the ``Fetcher``."""
+"""Test doubles for the browser seam, the ``Fetcher``, the notification senders and the pinger."""
 
 import json
 from collections.abc import Callable, Mapping, Sequence
@@ -6,6 +6,7 @@ from dataclasses import dataclass, field, replace
 
 from ticket_poller.config import Settings
 from ticket_poller.fetcher import BrowserError, RawResponse, ResponsePredicate, ResponseSink
+from ticket_poller.messages import Email, Push
 from ticket_poller.models import CapturedResponse, FetchResult
 
 JSON_HEADERS: Mapping[str, str] = {"content-type": "application/json;charset=utf-8"}
@@ -156,3 +157,74 @@ class FakeFetcher:
 
     def close(self) -> None:
         self.closed = True
+
+
+type FetchStep = FetchResult | Callable[[], FetchResult | None] | None
+
+
+class ScriptedFetcher:
+    """Plays ``script`` one step per ``fetch()``; the last step repeats. A step may be a
+    callable, e.g. to set ``stop`` mid-capture."""
+
+    def __init__(self, *script: FetchStep) -> None:
+        self.script = list(script)
+        self.fetches = 0
+        self.closes = 0
+
+    def fetch(self) -> FetchResult | None:
+        step = self.script[min(self.fetches, len(self.script) - 1)]
+        self.fetches += 1
+        return step() if callable(step) else step
+
+    def close(self) -> None:
+        self.closes += 1
+
+
+@dataclass
+class FakeEmailSender:
+    """Records delivered emails; raises while ``fail`` is set. ``on_send`` sees every attempt
+    first and may change ``fail`` or raise itself."""
+
+    sent: list[tuple[Email, tuple[str, ...]]] = field(default_factory=list)
+    fail: bool = False
+    on_send: Callable[[Email], None] | None = None
+
+    def send(self, email: Email, *, to: Sequence[str]) -> None:
+        if self.on_send is not None:
+            self.on_send(email)
+        if self.fail:
+            raise RuntimeError("smtp rejected")
+        self.sent.append((email, tuple(to)))
+
+    @property
+    def subjects(self) -> list[str]:
+        return [email.subject for email, _ in self.sent]
+
+
+@dataclass
+class FakePushSender:
+    sent: list[Push] = field(default_factory=list)
+    fail: bool = False
+    calls: int = 0
+    on_send: Callable[[Push], None] | None = None
+
+    def send(self, push: Push) -> None:
+        self.calls += 1
+        if self.on_send is not None:
+            self.on_send(push)
+        if self.fail:
+            raise RuntimeError("ntfy rejected")
+        self.sent.append(push)
+
+    @property
+    def titles(self) -> list[str]:
+        return [push.title for push in self.sent]
+
+
+@dataclass
+class FakePinger:
+    pings: int = 0
+
+    def ping(self) -> bool | None:
+        self.pings += 1
+        return True

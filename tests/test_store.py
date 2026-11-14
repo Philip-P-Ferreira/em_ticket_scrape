@@ -452,6 +452,14 @@ class TestDeliveries:
 
         assert keys == []
 
+    def test_delivered_keys_are_per_channel(self, store: Store) -> None:
+        sent, unsent = primary("A", "B"), primary("C", "D")
+        deliver(store, sent, T0, Channel.EMAIL, priority=Priority.NORMAL)
+        keys = [sent.identity, unsent.identity]
+
+        assert store.delivered_keys(keys, Channel.EMAIL) == {sent.identity}
+        assert store.delivered_keys(keys, Channel.PUSH) == set()
+
 
 def poll(store: Store, when: datetime, outcome: PollOutcome = PollOutcome.OK) -> None:
     """Record a poll that did not see any of the test listings."""

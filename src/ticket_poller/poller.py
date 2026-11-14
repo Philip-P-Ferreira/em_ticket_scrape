@@ -1,13 +1,24 @@
-"""Poll orchestration. T5 provides the dry run behind ``poll-once``: no writes, no notifications."""
+"""Poll orchestration: one pipeline shared by ``poll-once`` and the ``run`` service loop.
+
+A poll is fetch → parse → resale capture → baseline/rules → resolve → pending (§8). A dry
+run stops there; a live poll then records it, delivers per channel, pings healthchecks and
+sends the resale notices. ``run`` schedules polls, the outage/recovery notices, the daily
+canary and the auto-stop, each at its own wake-up time.
+"""
 
 import logging
-from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+import random
+import threading
+from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
+from enum import StrEnum
+from typing import Final, Protocol
 
 from ticket_poller import messages
 from ticket_poller.config import ConfigError, Settings
 from ticket_poller.fetcher import Fetcher, write_debug_dump
+from ticket_poller.logsetup import redact
 from ticket_poller.models import (
     Baseline,
     CapturedResponse,
@@ -17,23 +28,55 @@ from ticket_poller.models import (
     InventoryType,
     Listing,
     Match,
+    NoticeKind,
     PollOutcome,
     PriceSnapshot,
     ResaleCapture,
 )
+from ticket_poller.notify import AuditHook, Notifier
 from ticket_poller.parsing import ParseError, parse_inventory, resale_capture
 from ticket_poller.rules import candidates, compute_baseline, evaluate, price_snapshot
-from ticket_poller.status import current_baseline
-from ticket_poller.store import Store, key_matches
+from ticket_poller.schedule import (
+    Clock,
+    PollTiming,
+    canary_due,
+    event_over,
+    next_canary_at,
+    next_wake,
+    outage_deadline,
+    poll_delay,
+)
+from ticket_poller.status import canary_report, current_baseline
+from ticket_poller.store import PollRecord, Resolved, RuntimeState, Store, key_matches
 
 log = logging.getLogger(__name__)
 
+RESALE_MISSING_POLLS: Final = 3
+"""Consecutive MISSING polls before the ``resale_missing`` notice (§7)."""
+
+SUCCESS: Final = frozenset({PollOutcome.OK, PollOutcome.PARTIAL})
+
+
+class ExitReason(StrEnum):
+    """Why ``run`` returned; both map to exit code 0 so systemd does not restart."""
+
+    EVENT_OVER = "event_over"
+    SIGNAL = "signal"
+
+
+class Pinger(Protocol):
+    def ping(self) -> bool | None: ...
+
 
 @dataclass(frozen=True, slots=True)
-class PreviewMatch:
+class MatchStatus:
+    key: str
+    """The stored dedup key the match resolved to."""
     match: Match
     pending: frozenset[Channel]
-    """Channels this match would be sent on now (new, re-armed or upgraded)."""
+    """Channels owed this match when the poll ran (new, re-armed or upgraded)."""
+    sent: frozenset[Channel] = frozenset()
+    """Channels that delivered it during this poll (live polls only)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,114 +87,473 @@ class Findings:
     capture: ResaleCapture
     snapshot: PriceSnapshot
     baseline: Baseline
-    candidates: int
-    matches: tuple[PreviewMatch, ...]
+    candidates: tuple[Listing, ...]
+    resolved: tuple[Resolved, ...]
+    matches: tuple[MatchStatus, ...]
+
+    @property
+    def new_matches(self) -> list[MatchStatus]:
+        return [status for status in self.matches if status.pending]
 
 
 @dataclass(frozen=True, slots=True)
-class PollPreview:
+class PollReport:
+    started_at: datetime
     fetch: FetchResult
     outcome: PollOutcome
     detail: str
     findings: Findings | None
     has_state: bool
+    dry_run: bool
+
+    @property
+    def succeeded(self) -> bool:
+        return self.outcome in SUCCESS
 
 
-def preview_poll(
-    settings: Settings, fetcher: Fetcher, store: Store | None, started: datetime
-) -> PollPreview | None:
-    """Run fetch → parse → rules against a read-only store (or none yet); None if stopped.
+def audit_to(store: Store, clock: Clock) -> AuditHook:
+    """A ``Notifier`` audit hook that records every channel attempt in ``store``."""
 
-    T6 folds this into ``Poller.poll_once(dry_run=True)``.
-    """
-    result = fetcher.fetch()
-    if result is None:
-        return None
-    has_state = store is not None
-    if result.outcome is not PollOutcome.OK:
-        return PollPreview(result, result.outcome, result.detail, None, has_state)
+    def record(kind: NoticeKind, channel: Channel, ok: bool, subject: str) -> None:
+        store.log_notification(kind, channel, ok, subject, clock.now())
 
-    rules = settings.rule_config()
-    try:
-        inventory = parse_inventory(result.responses, rules.wanted_quantities)
-    except ParseError as exc:
-        detail = f"parse: {exc}"
-        _dump(settings, detail, result.responses)
-        return PollPreview(result, PollOutcome.ERROR, detail, None, has_state)
-
-    capture = resale_capture(inventory, result.resale_eligible)
-    baseline = (
-        current_baseline(store, settings, started)
-        if store is not None
-        else compute_baseline([], settings.baseline_min_samples)
-    )
-    current = candidates(inventory, rules)
-    matches = evaluate(inventory, baseline, rules)
-    findings = Findings(
-        inventory=inventory,
-        capture=capture,
-        snapshot=price_snapshot(inventory, rules),
-        baseline=baseline,
-        candidates=len(current),
-        matches=_with_pending(store, settings, current, matches, started),
-    )
-    outcome = PollOutcome.PARTIAL if capture is ResaleCapture.MISSING else PollOutcome.OK
-    return PollPreview(result, outcome, result.detail, findings, has_state)
+    return record
 
 
-def _dump(settings: Settings, reason: str, responses: Sequence[CapturedResponse]) -> None:
-    try:
-        path = write_debug_dump(
-            settings.debug_dir, reason, responses, secrets=settings.secret_values()
+class Poller:
+    """Runs polls and the service loop. ``store`` is the writer, or for a dry run the
+    read-only store (None before the first live poll)."""
+
+    def __init__(
+        self,
+        settings: Settings,
+        fetcher: Fetcher,
+        store: Store | None,
+        notifier: Notifier,
+        pinger: Pinger,
+        clock: Clock,
+        stop: threading.Event,
+        rng: random.Random | None = None,
+    ) -> None:
+        self._settings = settings
+        self._fetcher = fetcher
+        self._store = store
+        self._notifier = notifier
+        self._pinger = pinger
+        self._clock = clock
+        self._stop = stop
+        self._rng = rng if rng is not None else random.Random()
+        self._rules = settings.rule_config()
+        self._ctx = messages.MessageContext.from_settings(settings)
+        self._timing = PollTiming.from_settings(settings)
+        self._rearm_after = timedelta(hours=settings.realert_after_absent_hours)
+        self._outage_after = timedelta(minutes=settings.failure_alert_after_minutes)
+        self._next_poll: datetime | None = None
+
+    # --- the service loop (§8) -------------------------------------------------------------
+
+    def run(self) -> ExitReason:
+        """Poll until the auto-stop time or a stop request; notices wake the loop on time."""
+        self._next_poll = self._clock.now()
+        while not self._stop.is_set():
+            now = self._clock.now()
+            if event_over(now, self._settings.stop_after):
+                return self._finish()
+            if now >= self._next_poll:
+                report = self._poll_safely()
+                if report is None:
+                    break
+                self._next_poll = self._schedule_after(report)
+            self._send_due_notices(self._clock.now())
+            wake = self._next_wake(now)
+            if self._clock.wait((wake - self._clock.now()).total_seconds()):
+                break
+        log.info("stop requested; shutting down")
+        return ExitReason.SIGNAL
+
+    def _poll_safely(self) -> PollReport | None:
+        """``poll_once``, with any unexpected exception recorded as an ERROR poll."""
+        started = self._clock.now()
+        try:
+            return self.poll_once()
+        except Exception as exc:
+            log.exception("poll crashed")
+            detail = redact(f"crash: {type(exc).__name__}: {exc}", self._settings.secret_values())
+            elapsed = (self._clock.now() - started).total_seconds()
+            crashed = FetchResult(PollOutcome.ERROR, (), detail, None, elapsed)
+            return self._apply(self._report(started, crashed, PollOutcome.ERROR, detail))
+
+    def _schedule_after(self, report: PollReport) -> datetime:
+        state = self._db.get_state()
+        streak = (
+            state.consecutive_blocks
+            if report.outcome is PollOutcome.BLOCKED
+            else state.consecutive_failures
         )
-    except (ConfigError, OSError) as exc:
-        log.warning("could not write a debug dump: %s", exc)
-        return
-    log.info("debug dump written: %s", path)
+        delay = poll_delay(report.outcome, streak, self._timing, self._rng)
+        level = logging.INFO if report.succeeded else logging.WARNING
+        log.log(level, "%s next=%s", poll_summary(report, self._ctx), _seconds_text(delay))
+        return self._clock.now() + timedelta(seconds=delay)
+
+    def _next_wake(self, now: datetime) -> datetime:
+        state = self._db.get_state()
+        tz, hour = self._settings.tz, self._settings.canary_hour
+        return next_wake(
+            now,
+            self._next_poll,
+            next_canary_at(now, tz, hour),
+            self._settings.stop_after,
+            outage_deadline(state, self._outage_after),
+        )
+
+    def _send_due_notices(self, now: datetime) -> None:
+        """Outage, recovery and canary; each is retried at later wakes until delivered."""
+        deadline = outage_deadline(self._db.get_state(), self._outage_after)
+        if deadline is not None and now >= deadline:
+            self._announce_outage(now)
+        if self._db.get_state().recovery_pending:
+            self._announce_recovery()
+        state = self._db.get_state()
+        if canary_due(now, state.last_canary_date, self._settings.tz, self._settings.canary_hour):
+            self._send_canary(now)
+
+    def _announce_outage(self, now: datetime) -> None:
+        state = self._db.get_state()
+        if state.failure_started_at is None:
+            return
+        last = self._db.recent_polls(1)[0]
+        notice = messages.outage(
+            failing_for=now - state.failure_started_at,
+            outcome=last.outcome,
+            counts=self._db.stats_since(state.failure_started_at).outcomes,
+            last_detail=last.detail,
+            next_retry_at=self._next_poll,
+            ctx=self._ctx,
+        )
+        delivered = self._notify_admin(notice)
+        self._db.save_state(self._db.get_state().record_outage_notice(delivered))
+
+    def _announce_recovery(self) -> None:
+        state = self._db.get_state()
+        duration = timedelta(seconds=state.last_outage_duration_s or 0)
+        delivered = self._notify_admin(messages.recovered(outage_duration=duration))
+        self._db.save_state(self._db.get_state().record_recovery_notice(delivered))
+
+    def _send_canary(self, now: datetime) -> None:
+        email = messages.canary(canary_report(self._db, self._settings, now), self._ctx)
+        delivery = self._notifier.send(
+            NoticeKind.CANARY, to=[self._settings.admin_email], email=email
+        )
+        today = now.astimezone(self._settings.tz).date()
+        self._db.save_state(
+            self._db.get_state().record_canary(today, email_ok=delivery.ok(Channel.EMAIL))
+        )
+
+    def _finish(self) -> ExitReason:
+        """The auto-stop time has passed: send the one-time finished notice and exit."""
+        if not self._db.get_state().finished_notice_sent and self._notify_admin(
+            messages.finished(ctx=self._ctx)
+        ):
+            self._db.save_state(replace(self._db.get_state(), finished_notice_sent=True))
+        log.info("auto-stop time %s reached; exiting", self._settings.stop_after.isoformat())
+        return ExitReason.EVENT_OVER
+
+    def _notify_admin(self, notice: messages.Notice) -> bool:
+        """Admin email + ops push; the notice counts as done once any channel delivers."""
+        delivery = self._notifier.send(
+            notice.kind, to=[self._settings.admin_email], email=notice.email, push=notice.push
+        )
+        return delivery.any_ok
+
+    # --- one poll (§8 poll_once) ---------------------------------------------------------------
+
+    def poll_once(self, *, dry_run: bool = False) -> PollReport | None:
+        """Fetch and evaluate once; None if stop was requested mid-fetch (nothing is recorded).
+
+        A dry run only reads the store to label matches; it writes and sends nothing.
+        """
+        started = self._clock.now()
+        result = self._fetcher.fetch()
+        if result is None:
+            return None
+        report = self._evaluate(started, result, dry_run=dry_run)
+        return report if dry_run else self._apply(report)
+
+    def _evaluate(self, started: datetime, result: FetchResult, *, dry_run: bool) -> PollReport:
+        if result.outcome is not PollOutcome.OK:
+            return self._report(started, result, result.outcome, result.detail, dry_run=dry_run)
+        try:
+            inventory = parse_inventory(result.responses, self._rules.wanted_quantities)
+        except ParseError as exc:
+            detail = f"parse: {exc}"
+            self._dump(detail, result.responses)
+            return self._report(started, result, PollOutcome.ERROR, detail, dry_run=dry_run)
+        findings = self._findings(inventory, result.resale_eligible, started)
+        outcome = (
+            PollOutcome.PARTIAL if findings.capture is ResaleCapture.MISSING else PollOutcome.OK
+        )
+        return self._report(started, result, outcome, result.detail, findings, dry_run=dry_run)
+
+    def _report(
+        self,
+        started: datetime,
+        result: FetchResult,
+        outcome: PollOutcome,
+        detail: str,
+        findings: Findings | None = None,
+        *,
+        dry_run: bool = False,
+    ) -> PollReport:
+        has_state = self._store is not None
+        return PollReport(started, result, outcome, detail, findings, has_state, dry_run)
+
+    def _findings(self, inventory: Inventory, eligible: bool | None, now: datetime) -> Findings:
+        capture = resale_capture(inventory, eligible)
+        _log_capture(capture, eligible)
+        baseline = (
+            current_baseline(self._store, self._settings, now)
+            if self._store is not None
+            else compute_baseline([], self._settings.baseline_min_samples)
+        )
+        current = tuple(candidates(inventory, self._rules))
+        resolved = tuple(self._resolve(current, now))
+        keyed = key_matches(evaluate(inventory, baseline, self._rules), resolved)
+        pending = {channel: self._pending_keys(keyed, channel, resolved) for channel in Channel}
+        return Findings(
+            inventory=inventory,
+            capture=capture,
+            snapshot=price_snapshot(inventory, self._rules),
+            baseline=baseline,
+            candidates=current,
+            resolved=resolved,
+            matches=tuple(
+                MatchStatus(key, match, frozenset(ch for ch in Channel if key in pending[ch]))
+                for key, match in keyed
+            ),
+        )
+
+    def _resolve(self, current: Sequence[Listing], now: datetime) -> list[Resolved]:
+        if self._store is None:
+            return [Resolved(listing.identity, listing.identity, False) for listing in current]
+        return self._store.resolve(current, now, self._rearm_after)
+
+    def _pending_keys(
+        self, keyed: Sequence[tuple[str, Match]], channel: Channel, resolved: Sequence[Resolved]
+    ) -> set[str]:
+        if self._store is None:
+            return {key for key, _ in keyed}
+        return {key for key, _ in self._store.pending(keyed, channel, resolved)}
+
+    def _apply(self, report: PollReport) -> PollReport:
+        """Record a live poll and act on it: deliver, ping, resale notices or backoff."""
+        store, findings, now = self._db, report.findings, report.started_at
+        with store.transaction():
+            if findings is not None:
+                store.observe(findings.resolved, findings.candidates, now)
+            store.record_poll(_poll_record(report, self._rules.wanted_quantities))
+            state = store.get_state()
+            if report.succeeded:
+                state = state.record_success(now)
+            else:
+                state = state.record_failure(report.outcome, now)
+            if findings is not None:
+                state = _track_resale(state, findings.capture, report.fetch.resale_eligible)
+            store.save_state(state)
+        if not report.succeeded:
+            self._fetcher.close()  # relaunch the browser on the next poll (§9.1)
+            return report
+        report = self._deliver(report)
+        self._pinger.ping()
+        self._send_resale_notices(report)
+        return report
+
+    def _deliver(self, report: PollReport) -> PollReport:
+        """Per channel, email first: one batched message of what that channel still owes (§6.7)."""
+        findings = report.findings
+        if findings is None:
+            return report
+        sent: dict[str, set[Channel]] = {status.key: set() for status in findings.matches}
+        for channel in Channel:
+            owed = [status for status in findings.matches if channel in status.pending]
+            if not owed:
+                continue
+            if self._stop.is_set():
+                log.info("alert %s not sent: stopping; it stays pending", channel.value)
+                break
+            if self._send_alert(channel, owed, findings.baseline):
+                keyed = [(status.key, status.match) for status in owed]
+                self._db.mark_delivered(keyed, channel, self._clock.now())
+                for status in owed:
+                    sent[status.key].add(channel)
+        matches = tuple(
+            replace(status, sent=frozenset(sent[status.key])) for status in findings.matches
+        )
+        return replace(report, findings=replace(findings, matches=matches))
+
+    def _send_alert(
+        self, channel: Channel, owed: Sequence[MatchStatus], baseline: Baseline
+    ) -> bool:
+        matches = [status.match for status in owed]
+        to = self._settings.alert_recipients
+        if channel is Channel.PUSH:
+            push = messages.alert_push(matches, self._ctx)
+            return self._notifier.send(NoticeKind.ALERT, to=to, push=push).ok(channel)
+        delivered = self._db.delivered_keys([status.key for status in owed], channel)
+        upgraded = [status.match.listing.identity for status in owed if status.key in delivered]
+        email = messages.alert_email(
+            matches, baseline, self._ctx, self._clock.now(), upgraded=upgraded
+        )
+        return self._notifier.send(NoticeKind.ALERT, to=to, email=email).ok(channel)
+
+    def _send_resale_notices(self, report: PollReport) -> None:
+        """``resale_eligible`` once ever; ``resale_missing`` once per MISSING episode (§7)."""
+        findings = report.findings
+        if findings is None:
+            return
+        state = self._db.get_state()
+        if report.fetch.resale_eligible and not state.resale_eligible_notice_sent:
+            notice = messages.resale_eligible(capture=findings.capture, ctx=self._ctx)
+            if self._notify_admin(notice):
+                self._db.save_state(replace(state, resale_eligible_notice_sent=True))
+        state = self._db.get_state()
+        streak = state.resale_missing_streak
+        if streak >= RESALE_MISSING_POLLS and not state.resale_missing_notice_sent:
+            notice = messages.resale_missing(polls=streak, ctx=self._ctx)
+            if self._notify_admin(notice):
+                self._db.save_state(replace(state, resale_missing_notice_sent=True))
+
+    def _dump(self, reason: str, responses: Sequence[CapturedResponse]) -> None:
+        settings = self._settings
+        try:
+            path = write_debug_dump(
+                settings.debug_dir, reason, responses, secrets=settings.secret_values()
+            )
+        except (ConfigError, OSError) as exc:
+            log.warning("could not write a debug dump: %s", exc)
+            return
+        log.info("debug dump written: %s", path)
+
+    @property
+    def _db(self) -> Store:
+        if self._store is None:
+            raise RuntimeError("a live poll needs the state database")
+        return self._store
 
 
-def _with_pending(
-    store: Store | None,
-    settings: Settings,
-    current: Sequence[Listing],
-    matches: Sequence[Match],
-    now: datetime,
-) -> tuple[PreviewMatch, ...]:
-    if store is None:
-        return tuple(PreviewMatch(match, frozenset(Channel)) for match in matches)
-    rearm_after = timedelta(hours=settings.realert_after_absent_hours)
-    resolved = store.resolve(current, now, rearm_after)
-    keyed = key_matches(matches, resolved)
-    pending = {
-        channel: {key for key, _ in store.pending(keyed, channel, resolved)} for channel in Channel
-    }
-    return tuple(
-        PreviewMatch(match, frozenset(ch for ch in Channel if key in pending[ch]))
-        for key, match in keyed
+def _log_capture(capture: ResaleCapture, eligible: bool | None) -> None:
+    if capture is ResaleCapture.MISSING:
+        log.warning("resale eligible but no resale payload captured")
+    elif capture is ResaleCapture.UNKNOWN:
+        log.warning("resale eligibility flag not found")
+    elif capture is ResaleCapture.CAPTURED and eligible is False:
+        log.info("resale captured although the page says it is not eligible")
+
+
+def _track_resale(
+    state: RuntimeState, capture: ResaleCapture, eligible: bool | None
+) -> RuntimeState:
+    """Keep the latest eligibility flag and the MISSING streak; CAPTURED ends an episode."""
+    return replace(
+        state,
+        resale_eligible=state.resale_eligible if eligible is None else eligible,
+        resale_missing_streak=(
+            state.resale_missing_streak + 1 if capture is ResaleCapture.MISSING else 0
+        ),
+        resale_missing_notice_sent=(
+            state.resale_missing_notice_sent and capture is not ResaleCapture.CAPTURED
+        ),
     )
 
 
-# --- rendering ------------------------------------------------------------------------------
+def _poll_record(report: PollReport, wanted: frozenset[int]) -> PollRecord:
+    fetch, findings = report.fetch, report.findings
+    record = PollRecord(
+        started_at=report.started_at,
+        outcome=report.outcome,
+        detail=report.detail,
+        elapsed_s=fetch.elapsed_s,
+        browser_recycled=fetch.browser_recycled,
+    )
+    if findings is None:
+        return record
+    inventory = findings.inventory
+    return replace(
+        record,
+        resale_capture=findings.capture,
+        primary_listings=len(inventory.primary),
+        resale_listings=len(inventory.resale),
+        snapshot=findings.snapshot,
+        matches=len(findings.matches),
+        new_matches=len(findings.new_matches),
+        primary_labels=_cheapest_labels(inventory.primary, wanted),
+        resale_labels=_cheapest_labels(inventory.resale, wanted),
+    )
 
 
-def render_preview(preview: PollPreview, settings: Settings) -> str:
-    fetch = preview.fetch
-    head = f"poll {preview.outcome.value} in {fetch.elapsed_s:.1f}s"
+def _cheapest_labels(listings: Iterable[Listing], wanted: Iterable[int]) -> dict[int, str]:
+    """Per quantity, ``section row`` of the cheapest listing buyable as that quantity."""
+    labels = {}
+    for qty in wanted:
+        buyable = [listing for listing in listings if listing.buyable_as(qty)]
+        if buyable:
+            cheapest = min(buyable, key=lambda listing: listing.price_cents)
+            labels[qty] = f"{cheapest.section} {cheapest.row}"
+    return labels
+
+
+def poll_summary(report: PollReport, ctx: messages.MessageContext) -> str:
+    """The one-line log of a poll (§14), e.g. ``poll ok 3.1s: primary=6 … new=1 top=HIGH``."""
+    head = f"poll {report.outcome.value} {report.fetch.elapsed_s:.1f}s"
+    findings = report.findings
+    if findings is None:
+        return f"{head}: {report.detail or 'no detail'}"
+    inventory, snapshot = findings.inventory, findings.snapshot
+    prices = " ".join(
+        f"q{qty}{'~' if qty in inventory.inferred_quantities else ''}="
+        f"{'none' if cents is None else messages.money(cents)}"
+        for qty, cents in sorted(snapshot.primary_by_qty.items())
+    )
+    baseline = findings.baseline
+    baseline_text = (
+        f"{messages.money(baseline.median_cents)}(n={baseline.samples})"
+        if baseline.ready and baseline.median_cents is not None
+        else f"warming({baseline.samples}/{ctx.rules.baseline_min_samples})"
+    )
+    new = findings.new_matches
+    top = f" top={min(status.match.priority for status in new).name}" if new else ""
+    return (
+        f"{head}: primary={len(inventory.primary)} resale={len(inventory.resale)}"
+        f" resale_capture={findings.capture.value} {prices} baseline={baseline_text}"
+        f" matches={len(findings.matches)} new={len(new)}{top}"
+    )
+
+
+def _seconds_text(seconds: float) -> str:
+    minutes, secs = divmod(round(seconds), 60)
+    return f"{minutes}m{secs:02d}s" if minutes else f"{secs}s"
+
+
+# --- rendering (poll-once) --------------------------------------------------------------------
+
+
+def render_report(report: PollReport, settings: Settings) -> str:
+    fetch = report.fetch
+    head = f"poll {report.outcome.value} in {fetch.elapsed_s:.1f}s"
     if fetch.browser_recycled:
         head += " (browser recycled)"
     lines = [head]
-    if preview.detail:
-        lines.append(f"detail: {preview.detail}")
-    if (hint := messages.failure_hint(preview.outcome, preview.detail)) is not None:
+    if report.detail:
+        lines.append(f"detail: {report.detail}")
+    if (hint := messages.failure_hint(report.outcome, report.detail)) is not None:
         lines.append(f"hint: {hint}")
-    if preview.findings is not None:
-        lines.extend(_findings_lines(preview.findings, preview, settings))
+    if report.findings is not None:
+        lines.extend(_findings_lines(report.findings, report, settings))
     return "\n".join(lines)
 
 
-def _findings_lines(found: Findings, preview: PollPreview, settings: Settings) -> list[str]:
+def _findings_lines(found: Findings, report: PollReport, settings: Settings) -> list[str]:
     ctx = messages.MessageContext.from_settings(settings)
-    inventory, eligible = found.inventory, preview.fetch.resale_eligible
+    inventory, eligible = found.inventory, report.fetch.resale_eligible
     lines = [
         f"listings: primary={len(inventory.primary)} resale={len(inventory.resale)}"
         f" · resale_capture={found.capture.value}"
@@ -162,12 +564,12 @@ def _findings_lines(found: Findings, preview: PollPreview, settings: Settings) -
         "cheapest resale: " + _cheapest(found.snapshot.resale_by_qty),
         f"baseline: {messages.baseline_text(found.baseline, ctx)}",
         *(f"warning: {warning}" for warning in inventory.warnings),
-        f"candidates: {found.candidates} · matches: {len(found.matches)}",
+        f"candidates: {len(found.candidates)} · matches: {len(found.matches)}",
     ]
-    if not preview.has_state:
+    if not report.has_state:
         lines.append("(no state yet: every match counts as new)")
     for number, item in enumerate(found.matches, start=1):
-        lines.extend(_match_lines(number, item, found.baseline, ctx))
+        lines.extend(_match_lines(number, item, found.baseline, ctx, dry_run=report.dry_run))
     return lines
 
 
@@ -202,16 +604,34 @@ def _describe(listing: Listing) -> str:
     )
 
 
+def _channels(channels: Iterable[Channel]) -> str:
+    return ", ".join(sorted(channel.value for channel in channels))
+
+
+def _delivery_text(item: MatchStatus, *, dry_run: bool) -> str:
+    if not item.pending:
+        return "already sent"
+    if dry_run:
+        return f"would alert: {_channels(item.pending)}"
+    parts = []
+    if item.sent:
+        parts.append(f"sent: {_channels(item.sent)}")
+    if unsent := item.pending - item.sent:
+        parts.append(f"not sent (retried next poll): {_channels(unsent)}")
+    return " · ".join(parts)
+
+
 def _match_lines(
-    number: int, item: PreviewMatch, baseline: Baseline, ctx: messages.MessageContext
+    number: int,
+    item: MatchStatus,
+    baseline: Baseline,
+    ctx: messages.MessageContext,
+    *,
+    dry_run: bool,
 ) -> list[str]:
-    alert = (
-        "would alert: " + ", ".join(sorted(ch.value for ch in item.pending))
-        if item.pending
-        else "already sent"
-    )
     label = messages.priority_label(item.match, ctx.rules)
     return [
         f"{number}. [{label}] {_describe(item.match.listing)}",
-        f"   {messages.why_line(item.match, baseline, ctx)} · {alert}",
+        f"   {messages.why_line(item.match, baseline, ctx)}"
+        f" · {_delivery_text(item, dry_run=dry_run)}",
     ]

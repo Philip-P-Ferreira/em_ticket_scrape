@@ -1,20 +1,23 @@
-"""The dry-run poll behind ``poll-once``: fetch → parse → rules, with a fake fetcher."""
+"""``poll-once``: the dry run (fetch → parse → rules, read-only) and ``--notify``."""
 
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from tests.builders import EVENT_API, load_captured
-from tests.fakes import FakeFetcher
+from tests.fake_clock import FakeClock
+from tests.fakes import FakeEmailSender, FakeFetcher, FakePinger, FakePushSender
 from tests.sample_env import EnvFileFactory
-from ticket_poller import fetcher
+from ticket_poller import fetcher, notify
 from ticket_poller.cli import ExitCode, main
 from ticket_poller.config import Settings, load_settings
 from ticket_poller.models import CapturedResponse, Channel, FetchResult, PollOutcome
+from ticket_poller.notify import Notifier
 from ticket_poller.parsing import parse_inventory
-from ticket_poller.poller import PollPreview, preview_poll, render_preview
+from ticket_poller.poller import Poller, PollReport, render_report
 from ticket_poller.rules import candidates, compute_baseline, evaluate
 from ticket_poller.store import Store, key_matches
 
@@ -47,17 +50,26 @@ def fake_fetcher(monkeypatch: pytest.MonkeyPatch) -> Iterator[FakeFetcher]:
     assert fake.closed
 
 
+def dry_poller(settings: Settings, result: FetchResult | None, store: Store | None) -> Poller:
+    """A poller whose notifier and pinger would fail the test if a dry run used them."""
+    clock = FakeClock(NOW)
+    notifier = Notifier(
+        FakeEmailSender(fail=True), *[FakePushSender(fail=True)] * 2, stop=clock.stop
+    )
+    return Poller(settings, FakeFetcher(result), store, notifier, FakePinger(), clock, clock.stop)
+
+
 def preview(
     settings: Settings, result: FetchResult | None, store: Store | None = None
-) -> PollPreview:
-    found = preview_poll(settings, FakeFetcher(result), store, NOW)
+) -> PollReport:
+    found = dry_poller(settings, result, store).poll_once(dry_run=True)
     assert found is not None
     return found
 
 
 class TestPreview:
     def test_without_state_every_match_is_new(self, settings: Settings) -> None:
-        report = render_preview(preview(settings, fetched(*PRIMARY, QP3)), settings)
+        report = render_report(preview(settings, fetched(*PRIMARY, QP3)), settings)
 
         lines = report.splitlines()
         assert lines[:14] == [
@@ -90,7 +102,7 @@ class TestPreview:
         ]
 
     def test_inferred_qty3_is_reported(self, settings: Settings) -> None:
-        report = render_preview(preview(settings, fetched(*PRIMARY)), settings)
+        report = render_report(preview(settings, fetched(*PRIMARY)), settings)
 
         assert "quickpicks: qty 2 captured, qty 3 inferred from maxQuantity" in report
         assert "warning: no quickpicks for qty=3; inferred from maxQuantity" in report
@@ -101,7 +113,7 @@ class TestPreview:
         before = settings.db_path.read_bytes()
 
         with Store.open_readonly(settings.db_path) as store:
-            report = render_preview(preview(settings, result, store), settings)
+            report = render_report(preview(settings, result, store), settings)
 
         assert settings.db_path.read_bytes() == before
         alerts = [line.rsplit(" · ", 1)[1] for line in report.splitlines() if "Why:" in line]
@@ -113,7 +125,7 @@ class TestPreview:
             outcome=PollOutcome.BLOCKED, detail="blocked: document 403", resale_eligible=None
         )
 
-        report = render_preview(preview(settings, blocked), settings)
+        report = render_report(preview(settings, blocked), settings)
 
         assert report.splitlines()[:2] == ["poll blocked in 11.2s", "detail: blocked: document 403"]
         assert report.splitlines()[2].startswith("hint: Ticketmaster is blocking the poller.")
@@ -145,14 +157,14 @@ class TestPreview:
     def test_missing_resale_capture_is_partial(self, settings: Settings) -> None:
         found = preview(settings, fetched(*PRIMARY, resale_eligible=True, recycled=True))
 
-        report = render_preview(found, settings)
+        report = render_report(found, settings)
 
         assert found.outcome is PollOutcome.PARTIAL
         assert report.splitlines()[0] == "poll partial in 11.2s (browser recycled)"
         assert "resale_capture=missing (page isResaleEligible=true)" in report
 
     def test_stopped_fetch(self, settings: Settings) -> None:
-        assert preview_poll(settings, FakeFetcher(None), None, NOW) is None
+        assert dry_poller(settings, None, None).poll_once(dry_run=True) is None
 
 
 def deliver(settings: Settings, result: FetchResult, *, sent: int, email_only: int) -> None:
@@ -214,9 +226,29 @@ class TestPollOnceCommand:
 
         assert capsys.readouterr().out == "poll-once: stopped\n"
 
-    def test_notify_is_not_available_yet(
-        self, settings: Settings, capsys: pytest.CaptureFixture[str]
+    def test_notify_records_the_poll_and_sends_the_alerts(
+        self,
+        settings: Settings,
+        fake_fetcher: FakeFetcher,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
     ) -> None:
-        assert main(["poll-once", "--notify"]) == ExitCode.CRASH
+        email, push, pinger = FakeEmailSender(), FakePushSender(), FakePinger()
 
-        assert "not implemented yet (T6)" in capsys.readouterr().err
+        def fake_notifier(settings: Settings, client: object, **kwargs: Any) -> Notifier:
+            return Notifier(email, push, push, **kwargs)
+
+        monkeypatch.setattr(notify, "build_notifier", fake_notifier)
+        monkeypatch.setattr(notify, "build_pinger", lambda *args, **kwargs: pinger)
+
+        assert main(["poll-once", "--notify"]) == ExitCode.OK
+
+        out = capsys.readouterr().out
+        assert out.count("sent: email, push") == 3
+        assert len(email.sent) == 1
+        assert len(push.sent) == 1
+        assert pinger.pings == 1
+        with Store.open_readonly(settings.db_path) as store:
+            (poll,) = store.recent_polls(5)
+            assert poll.outcome is PollOutcome.OK
+            assert store.get_state().consecutive_failures == 0

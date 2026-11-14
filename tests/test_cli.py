@@ -4,7 +4,9 @@ from pathlib import Path
 
 import pytest
 
+from tests.fakes import FakeFetcher
 from tests.sample_env import APP_PASSWORD, NTFY_TOPIC, EnvFileFactory
+from ticket_poller import fetcher
 from ticket_poller.cli import (
     LOCK_HELD_MESSAGE,
     ExitCode,
@@ -15,6 +17,14 @@ from ticket_poller.cli import (
 )
 
 COMMANDS = ("run", "poll-once", "test-notify", "canary-now", "status")
+
+
+@pytest.fixture
+def stopped_fetcher(monkeypatch: pytest.MonkeyPatch) -> FakeFetcher:
+    """A fetcher interrupted by a stop request: ``poll-once`` exits 0 without a browser."""
+    fake = FakeFetcher(None)
+    monkeypatch.setattr(fetcher, "build_fetcher", lambda *args: fake)
+    return fake
 
 
 class TestParser:
@@ -85,13 +95,12 @@ class TestMain:
         assert main(["status"]) == ExitCode.CONFIG
         assert "not a directory" in capsys.readouterr().out
 
-    def test_stub_command_prepares_private_state(
-        self, make_env_file: EnvFileFactory, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    def test_command_prepares_private_state(
+        self, make_env_file: EnvFileFactory, tmp_path: Path, stopped_fetcher: FakeFetcher
     ) -> None:
         make_env_file()
 
-        assert main(["run"]) == ExitCode.CRASH
-        assert "not implemented yet" in capsys.readouterr().err
+        assert main(["poll-once"]) == ExitCode.OK
         for name in ("state", "state/debug", "profile"):
             assert stat.S_IMODE((tmp_path / name).stat().st_mode) == 0o700
 
@@ -114,12 +123,15 @@ class TestMain:
         assert LOCK_HELD_MESSAGE in capsys.readouterr().err
 
     def test_lock_free_command_runs(
-        self, make_env_file: EnvFileFactory, capsys: pytest.CaptureFixture[str]
+        self,
+        make_env_file: EnvFileFactory,
+        stopped_fetcher: FakeFetcher,
+        capsys: pytest.CaptureFixture[str],
     ) -> None:
         make_env_file()
 
-        assert main(["run"]) == ExitCode.CRASH
-        assert "run: not implemented yet" in capsys.readouterr().err
+        assert main(["poll-once"]) == ExitCode.OK
+        assert capsys.readouterr().out == "poll-once: stopped\n"
 
 
 class TestInstanceLock:

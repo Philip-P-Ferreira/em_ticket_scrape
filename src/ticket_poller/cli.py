@@ -19,7 +19,8 @@ import httpx
 from ticket_poller import __version__, fetcher, messages, notify, poller
 from ticket_poller.config import ConfigError, Settings, load_settings, secure_runtime
 from ticket_poller.logsetup import configure_logging
-from ticket_poller.models import Channel, NoticeKind, PollOutcome
+from ticket_poller.models import Channel, NoticeKind
+from ticket_poller.schedule import SystemClock
 from ticket_poller.status import canary_report, render_status
 from ticket_poller.store import NoStateError, Store, StoreError
 
@@ -57,13 +58,49 @@ def instance_lock(path: Path) -> Iterator[None]:
         os.close(fd)  # also releases the lock
 
 
-def _not_implemented(command: str, task: str) -> int:
-    print(f"ticket-poller {command}: not implemented yet ({task})", file=sys.stderr)
-    return ExitCode.CRASH
-
-
 def _cmd_run(args: argparse.Namespace, settings: Settings) -> int:
-    return _not_implemented("run", "T6")
+    """The service loop; exits 0 on the auto-stop time or a signal (§2)."""
+    log.info("starting: %s", settings.summary())
+    try:
+        store = Store.open_writer(settings.db_path)
+    except StoreError as exc:
+        log.error("%s", exc)
+        return ExitCode.CRASH
+    stop = threading.Event()
+    with ExitStack() as stack:
+        service = _build_poller(stack, settings, store, stop, live=True)
+        reason = service.run()
+    log.info("exited: %s", reason.value)
+    return ExitCode.OK
+
+
+def _build_poller(
+    stack: ExitStack,
+    settings: Settings,
+    store: Store | None,
+    stop: threading.Event,
+    *,
+    live: bool,
+) -> poller.Poller:
+    """Wire the poller; ``stack`` closes the store, browser and HTTP client in reverse order.
+
+    Only a live poller records notification attempts (a dry run sends nothing anyway).
+    """
+    if store is not None:
+        stack.enter_context(store)
+    stack.enter_context(_stop_on_signals(stop))
+    clock = SystemClock(stop)
+    client = stack.enter_context(httpx.Client())
+    audit = poller.audit_to(store, clock) if live and store is not None else None
+    return poller.Poller(
+        settings,
+        stack.enter_context(closing(fetcher.build_fetcher(settings, stop))),
+        store,
+        notify.build_notifier(settings, client, stop=stop, audit=audit),
+        notify.build_pinger(settings, client, stop=stop),
+        clock,
+        stop,
+    )
 
 
 @contextmanager
@@ -88,38 +125,33 @@ def _open_store_if_any(settings: Settings) -> Store | None:
 
 
 def _cmd_poll_once(args: argparse.Namespace, settings: Settings) -> int:
-    """Dry run: one real fetch, evaluated against the read-only store; nothing is sent or saved."""
-    if args.notify:
-        return _not_implemented("poll-once --notify", "T6")
+    """One real fetch. By default a dry run against the read-only store: nothing is sent or
+    saved. ``--notify`` uses the writer and behaves exactly like one service poll."""
     try:
-        store = _open_store_if_any(settings)
+        store = Store.open_writer(settings.db_path) if args.notify else _open_store_if_any(settings)
     except StoreError as exc:
         log.error("%s", exc)
         return ExitCode.CRASH
 
     stop = threading.Event()
     with ExitStack() as stack:
-        if store is not None:
-            stack.enter_context(store)
-        stack.enter_context(_stop_on_signals(stop))
-        source = stack.enter_context(closing(fetcher.build_fetcher(settings, stop)))
-        preview = poller.preview_poll(settings, source, store, datetime.now(UTC))
-    if preview is None:
+        service = _build_poller(stack, settings, store, stop, live=args.notify)
+        report = service.poll_once(dry_run=not args.notify)
+    if report is None:
         print("poll-once: stopped")
         return ExitCode.OK
 
     if args.save is not None:
         try:
             saved = fetcher.save_responses(
-                args.save, preview.fetch.responses, settings.secret_values()
+                args.save, report.fetch.responses, settings.secret_values()
             )
         except (ConfigError, OSError) as exc:
             log.error("cannot save responses: %s", exc)
             return ExitCode.CRASH
         print(f"saved {len(saved)} responses to {args.save}")
-    print(poller.render_preview(preview, settings))
-    succeeded = preview.outcome in (PollOutcome.OK, PollOutcome.PARTIAL)
-    return ExitCode.OK if succeeded else ExitCode.CRASH
+    print(poller.render_report(report, settings))
+    return ExitCode.OK if report.succeeded else ExitCode.CRASH
 
 
 def _send_to_admin(
