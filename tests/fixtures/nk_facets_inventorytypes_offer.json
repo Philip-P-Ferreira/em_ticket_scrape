@@ -1,0 +1,889 @@
+{
+ "_source_url": "https://services.ticketmaster.com/api/ismds/event/2000655CAB442FB5/facets?by=inventorytypes+offer&q=available&show=listpricerange&embed=offer&resaleChannelId=internal.ecommerce.consumer.desktop.web.browser.ticketmaster.us",
+ "_trimmed": "Trimmed for tests: dropped _links, alternateIds, maps/description/area embeds and apikey/apisecret URL params.",
+ "response": {
+  "schema": "urn:com.ticketmaster.services:schema:ismds:EventFacets:1.0",
+  "meta": {
+   "type": "urn:com.ticketmaster.services:type:ismds:EventFacets",
+   "modified": "2026-11-14T04:34:37.369644126Z",
+   "expires": "2026-11-14T04:35:37.369644126Z"
+  },
+  "eventId": "2000655CAB442FB5",
+  "facets": [
+   {
+    "inventoryTypes": [
+     "primary"
+    ],
+    "offers": [
+     "GJ6DEMJRIYYDAMBQGAYDAN34GM4TSLRVGB6DOMROGY2XYNBOGAYHYMZZFY4TK7D4PR6A"
+    ],
+    "count": 60,
+    "listPriceRange": [
+     {
+      "currency": "USD",
+      "min": 403.5,
+      "max": 403.5
+     }
+    ]
+   },
+   {
+    "inventoryTypes": [
+     "primary"
+    ],
+    "offers": [
+     "GJ6DEMJRIYYDAMBQGAYDAN34GM3TSLRVGB6DMOJOGA2XYNBOGAYHYMZXFY4TK7D4PR6A"
+    ],
+    "count": 25,
+    "listPriceRange": [
+     {
+      "currency": "USD",
+      "min": 383.5,
+      "max": 383.5
+     }
+    ]
+   },
+   {
+    "inventoryTypes": [
+     "primary"
+    ],
+    "offers": [
+     "GJ6DEMJRIYYDAMBQGAYDAN34GMZTSLRVGB6DMMJOHA2XYNBOGAYHYMZTFY4TK7D4PR6A"
+    ],
+    "count": 9,
+    "listPriceRange": [
+     {
+      "currency": "USD",
+      "min": 343.5,
+      "max": 343.5
+     }
+    ]
+   },
+   {
+    "inventoryTypes": [
+     "primary"
+    ],
+    "offers": [
+     "GJ6DEMJRIYYDAMBQGAYDAN34GI3TSLRVGB6DKMJOGA2XYNBOGAYHYMRXFY4TK7D4PR6A"
+    ],
+    "count": 1,
+    "listPriceRange": [
+     {
+      "currency": "USD",
+      "min": 283.5,
+      "max": 283.5
+     }
+    ]
+   },
+   {
+    "inventoryTypes": [
+     "primary"
+    ],
+    "offers": [
+     "GJ6DC7BVGU"
+    ],
+    "count": 1,
+    "listPriceRange": [
+     {
+      "currency": "USD",
+      "min": 234.95,
+      "max": 234.95
+     }
+    ]
+   },
+   {
+    "inventoryTypes": [
+     "primary"
+    ],
+    "offers": [
+     "GJ6DGMRTGAYDAMBQGAYDC7BVGU"
+    ],
+    "count": 1,
+    "listPriceRange": [
+     {
+      "currency": "USD",
+      "min": 234.95,
+      "max": 234.95
+     }
+    ]
+   },
+   {
+    "inventoryTypes": [
+     "primary"
+    ],
+    "offers": [
+     "GJ6DC7BVGM"
+    ],
+    "count": 2,
+    "listPriceRange": [
+     {
+      "currency": "USD",
+      "min": 284.95,
+      "max": 284.95
+     }
+    ]
+   },
+   {
+    "inventoryTypes": [
+     "primary"
+    ],
+    "offers": [
+     "GJ6DEMJRIYYDAMBQGAYDAN34GMZTALRVGB6DMMBOGIYHYNBOGAYHYMZTFYYDK7D4PR6A"
+    ],
+    "count": 1,
+    "listPriceRange": [
+     {
+      "currency": "USD",
+      "min": 334.5,
+      "max": 334.5
+     }
+    ]
+   },
+   {
+    "inventoryTypes": [
+     "primary"
+    ],
+    "offers": [
+     "GJ6DEMJRIYYDAMBQGAYDAN34GI3DCLRQGB6DINZOG4YHYNBOGAYHYMRWFYYTA7D4PR6A"
+    ],
+    "count": 1,
+    "listPriceRange": [
+     {
+      "currency": "USD",
+      "min": 265.0,
+      "max": 265.0
+     }
+    ]
+   },
+   {
+    "inventoryTypes": [
+     "primary"
+    ],
+    "offers": [
+     "GJ6DEMJRIYYDAMBQGAYDAN34GMZDSLRVGB6DMMBOGA2XYNBOGAYHYMZSFY4TK7D4PR6A"
+    ],
+    "count": 5,
+    "listPriceRange": [
+     {
+      "currency": "USD",
+      "min": 333.5,
+      "max": 333.5
+     }
+    ]
+   },
+   {
+    "inventoryTypes": [
+     "primary"
+    ],
+    "offers": [
+     "GJ6DEMJRIYYDAMBQGAYDAN34GI4DALRVGB6DKMJOGIYHYNBOGAYHYMRYFYYDK7D4PR6A"
+    ],
+    "count": 3,
+    "listPriceRange": [
+     {
+      "currency": "USD",
+      "min": 284.5,
+      "max": 284.5
+     }
+    ]
+   },
+   {
+    "inventoryTypes": [
+     "primary"
+    ],
+    "offers": [
+     "GJ6DC7BVGE"
+    ],
+    "count": 1,
+    "listPriceRange": [
+     {
+      "currency": "USD",
+      "min": 334.95,
+      "max": 334.95
+     }
+    ]
+   },
+   {
+    "inventoryTypes": [
+     "primary"
+    ],
+    "offers": [
+     "GJ6DEQJRGAYDAMBQGAYDS7BVGE"
+    ],
+    "count": 1,
+    "listPriceRange": [
+     {
+      "currency": "USD",
+      "min": 334.95,
+      "max": 334.95
+     }
+    ]
+   }
+  ],
+  "_embedded": {
+   "offer": [
+    {
+     "schema": "urn:com.ticketmaster.services:schema:ismds:EventOffer:1.0",
+     "meta": {
+      "type": "urn:com.ticketmaster.services:type:ismds:EventOffer",
+      "modified": "2026-11-14T04:34:37.369644126Z",
+      "expires": "2026-11-14T04:44:37.369644126Z"
+     },
+     "offerId": "GJ6DC7BVGE",
+     "name": "Standard Admission",
+     "rank": 3,
+     "online": true,
+     "protected": false,
+     "rollup": false,
+     "inventoryType": "primary",
+     "offerType": "standard",
+     "ticketTypeId": "000000000001",
+     "auditPriceLevel": "4",
+     "priceLevelId": "51",
+     "priceLevelSecname": "P4",
+     "description": "Standard Admission",
+     "currency": "USD",
+     "listPrice": 334.95,
+     "faceValue": 334.95,
+     "totalPrice": 408.4,
+     "noChargesPrice": 330.95,
+     "charges": [
+      {
+       "reason": "face_value_tax",
+       "type": "tax",
+       "amount": 33.1
+      },
+      {
+       "reason": "service",
+       "type": "fee",
+       "amount": 40.35
+      },
+      {
+       "reason": "order_processing",
+       "type": "fee",
+       "subType": "default",
+       "amount": 0.0
+      }
+     ],
+     "sellableQuantities": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+     ]
+    },
+    {
+     "schema": "urn:com.ticketmaster.services:schema:ismds:EventOffer:1.0",
+     "meta": {
+      "type": "urn:com.ticketmaster.services:type:ismds:EventOffer",
+      "modified": "2026-11-14T04:34:37.369644126Z",
+      "expires": "2026-11-14T04:44:37.369644126Z"
+     },
+     "offerId": "GJ6DC7BVGM",
+     "name": "Standard Admission",
+     "rank": 3,
+     "online": true,
+     "protected": false,
+     "rollup": false,
+     "inventoryType": "primary",
+     "offerType": "standard",
+     "ticketTypeId": "000000000001",
+     "auditPriceLevel": "6",
+     "priceLevelId": "53",
+     "priceLevelSecname": "P6",
+     "description": "Standard Admission",
+     "currency": "USD",
+     "listPrice": 284.95,
+     "faceValue": 284.95,
+     "totalPrice": 351.85,
+     "noChargesPrice": 280.95,
+     "charges": [
+      {
+       "reason": "face_value_tax",
+       "type": "tax",
+       "amount": 28.1
+      },
+      {
+       "reason": "order_processing",
+       "type": "fee",
+       "subType": "default",
+       "amount": 0.0
+      },
+      {
+       "reason": "service",
+       "type": "fee",
+       "amount": 38.8
+      }
+     ],
+     "sellableQuantities": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+     ]
+    },
+    {
+     "schema": "urn:com.ticketmaster.services:schema:ismds:EventOffer:1.0",
+     "meta": {
+      "type": "urn:com.ticketmaster.services:type:ismds:EventOffer",
+      "modified": "2026-11-14T04:34:37.369644126Z",
+      "expires": "2026-11-14T04:44:37.369644126Z"
+     },
+     "offerId": "GJ6DC7BVGU",
+     "name": "Standard Admission",
+     "rank": 3,
+     "online": true,
+     "protected": false,
+     "rollup": false,
+     "inventoryType": "primary",
+     "offerType": "standard",
+     "ticketTypeId": "000000000001",
+     "auditPriceLevel": "8",
+     "priceLevelId": "55",
+     "priceLevelSecname": "P8",
+     "description": "Standard Admission",
+     "currency": "USD",
+     "listPrice": 234.95,
+     "faceValue": 234.95,
+     "totalPrice": 295.35,
+     "noChargesPrice": 230.95,
+     "charges": [
+      {
+       "reason": "service",
+       "type": "fee",
+       "amount": 37.3
+      },
+      {
+       "reason": "order_processing",
+       "type": "fee",
+       "subType": "default",
+       "amount": 0.0
+      },
+      {
+       "reason": "face_value_tax",
+       "type": "tax",
+       "amount": 23.1
+      }
+     ],
+     "sellableQuantities": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+     ]
+    },
+    {
+     "schema": "urn:com.ticketmaster.services:schema:ismds:EventOffer:1.0",
+     "meta": {
+      "type": "urn:com.ticketmaster.services:type:ismds:EventOffer",
+      "modified": "2026-11-14T04:34:37.369644126Z",
+      "expires": "2026-11-14T04:44:37.369644126Z"
+     },
+     "offerId": "GJ6DEMJRIYYDAMBQGAYDAN34GI3DCLRQGB6DINZOG4YHYNBOGAYHYMRWFYYTA7D4PR6A",
+     "name": "Standard Admission",
+     "rank": 0,
+     "online": true,
+     "protected": false,
+     "rollup": false,
+     "inventoryType": "primary",
+     "offerType": "standard",
+     "ticketTypeId": "211F00000007",
+     "ticketTypeUnsoldQualifier": "PLATINUM2AVAIL",
+     "description": "Standard Admission",
+     "currency": "USD",
+     "listPrice": 265.0,
+     "faceValue": 265.0,
+     "totalPrice": 338.8,
+     "noChargesPrice": 261.0,
+     "charges": [
+      {
+       "reason": "service",
+       "type": "fee",
+       "amount": 47.7
+      },
+      {
+       "reason": "face_value_tax",
+       "type": "tax",
+       "amount": 26.1
+      },
+      {
+       "reason": "order_processing",
+       "type": "fee",
+       "subType": "default",
+       "amount": 0.0
+      }
+     ],
+     "sellableQuantities": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+     ]
+    },
+    {
+     "schema": "urn:com.ticketmaster.services:schema:ismds:EventOffer:1.0",
+     "meta": {
+      "type": "urn:com.ticketmaster.services:type:ismds:EventOffer",
+      "modified": "2026-11-14T04:34:37.369644126Z",
+      "expires": "2026-11-14T04:44:37.369644126Z"
+     },
+     "offerId": "GJ6DEMJRIYYDAMBQGAYDAN34GI3TSLRVGB6DKMJOGA2XYNBOGAYHYMRXFY4TK7D4PR6A",
+     "name": "Standard Admission",
+     "rank": 0,
+     "online": true,
+     "protected": false,
+     "rollup": false,
+     "inventoryType": "primary",
+     "offerType": "standard",
+     "ticketTypeId": "211F00000007",
+     "ticketTypeUnsoldQualifier": "PLATINUM2AVAIL",
+     "description": "Standard Admission",
+     "currency": "USD",
+     "listPrice": 283.5,
+     "faceValue": 283.5,
+     "totalPrice": 362.5,
+     "noChargesPrice": 279.5,
+     "charges": [
+      {
+       "reason": "service",
+       "type": "fee",
+       "amount": 51.05
+      },
+      {
+       "reason": "face_value_tax",
+       "type": "tax",
+       "amount": 27.95
+      },
+      {
+       "reason": "order_processing",
+       "type": "fee",
+       "subType": "default",
+       "amount": 0.0
+      }
+     ],
+     "sellableQuantities": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+     ]
+    },
+    {
+     "schema": "urn:com.ticketmaster.services:schema:ismds:EventOffer:1.0",
+     "meta": {
+      "type": "urn:com.ticketmaster.services:type:ismds:EventOffer",
+      "modified": "2026-11-14T04:34:37.369644126Z",
+      "expires": "2026-11-14T04:44:37.369644126Z"
+     },
+     "offerId": "GJ6DEMJRIYYDAMBQGAYDAN34GI4DALRVGB6DKMJOGIYHYNBOGAYHYMRYFYYDK7D4PR6A",
+     "name": "Standard Admission",
+     "rank": 0,
+     "online": true,
+     "protected": false,
+     "rollup": false,
+     "inventoryType": "primary",
+     "offerType": "standard",
+     "ticketTypeId": "211F00000007",
+     "ticketTypeUnsoldQualifier": "PLATINUM2AVAIL",
+     "description": "Standard Admission",
+     "currency": "USD",
+     "listPrice": 284.5,
+     "faceValue": 284.5,
+     "totalPrice": 363.75,
+     "noChargesPrice": 280.5,
+     "charges": [
+      {
+       "reason": "service",
+       "type": "fee",
+       "amount": 51.2
+      },
+      {
+       "reason": "face_value_tax",
+       "type": "tax",
+       "amount": 28.05
+      },
+      {
+       "reason": "order_processing",
+       "type": "fee",
+       "subType": "default",
+       "amount": 0.0
+      }
+     ],
+     "sellableQuantities": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+     ]
+    },
+    {
+     "schema": "urn:com.ticketmaster.services:schema:ismds:EventOffer:1.0",
+     "meta": {
+      "type": "urn:com.ticketmaster.services:type:ismds:EventOffer",
+      "modified": "2026-11-14T04:34:37.369644126Z",
+      "expires": "2026-11-14T04:44:37.369644126Z"
+     },
+     "offerId": "GJ6DEMJRIYYDAMBQGAYDAN34GM3TSLRVGB6DMOJOGA2XYNBOGAYHYMZXFY4TK7D4PR6A",
+     "name": "Standard Admission",
+     "rank": 0,
+     "online": true,
+     "protected": false,
+     "rollup": false,
+     "inventoryType": "primary",
+     "offerType": "standard",
+     "ticketTypeId": "211F00000007",
+     "ticketTypeUnsoldQualifier": "PLATINUM2AVAIL",
+     "description": "Standard Admission",
+     "currency": "USD",
+     "listPrice": 383.5,
+     "faceValue": 383.5,
+     "totalPrice": 490.5,
+     "noChargesPrice": 379.5,
+     "charges": [
+      {
+       "reason": "service",
+       "type": "fee",
+       "amount": 69.05
+      },
+      {
+       "reason": "face_value_tax",
+       "type": "tax",
+       "amount": 37.95
+      },
+      {
+       "reason": "order_processing",
+       "type": "fee",
+       "subType": "default",
+       "amount": 0.0
+      }
+     ],
+     "sellableQuantities": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+     ]
+    },
+    {
+     "schema": "urn:com.ticketmaster.services:schema:ismds:EventOffer:1.0",
+     "meta": {
+      "type": "urn:com.ticketmaster.services:type:ismds:EventOffer",
+      "modified": "2026-11-14T04:34:37.369644126Z",
+      "expires": "2026-11-14T04:44:37.369644126Z"
+     },
+     "offerId": "GJ6DEMJRIYYDAMBQGAYDAN34GM4TSLRVGB6DOMROGY2XYNBOGAYHYMZZFY4TK7D4PR6A",
+     "name": "Standard Admission",
+     "rank": 0,
+     "online": true,
+     "protected": false,
+     "rollup": false,
+     "inventoryType": "primary",
+     "offerType": "standard",
+     "ticketTypeId": "211F00000007",
+     "ticketTypeUnsoldQualifier": "PLATINUM2AVAIL",
+     "description": "Standard Admission",
+     "currency": "USD",
+     "listPrice": 403.5,
+     "faceValue": 403.5,
+     "totalPrice": 516.1,
+     "noChargesPrice": 399.5,
+     "charges": [
+      {
+       "reason": "service",
+       "type": "fee",
+       "amount": 72.65
+      },
+      {
+       "reason": "face_value_tax",
+       "type": "tax",
+       "amount": 39.95
+      },
+      {
+       "reason": "order_processing",
+       "type": "fee",
+       "subType": "default",
+       "amount": 0.0
+      }
+     ],
+     "sellableQuantities": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+     ]
+    },
+    {
+     "schema": "urn:com.ticketmaster.services:schema:ismds:EventOffer:1.0",
+     "meta": {
+      "type": "urn:com.ticketmaster.services:type:ismds:EventOffer",
+      "modified": "2026-11-14T04:34:37.369644126Z",
+      "expires": "2026-11-14T04:44:37.369644126Z"
+     },
+     "offerId": "GJ6DEMJRIYYDAMBQGAYDAN34GMZDSLRVGB6DMMBOGA2XYNBOGAYHYMZSFY4TK7D4PR6A",
+     "name": "Standard Admission",
+     "rank": 0,
+     "online": true,
+     "protected": false,
+     "rollup": false,
+     "inventoryType": "primary",
+     "offerType": "standard",
+     "ticketTypeId": "211F00000007",
+     "ticketTypeUnsoldQualifier": "PLATINUM2AVAIL",
+     "description": "Standard Admission",
+     "currency": "USD",
+     "listPrice": 333.5,
+     "faceValue": 333.5,
+     "totalPrice": 426.5,
+     "noChargesPrice": 329.5,
+     "charges": [
+      {
+       "reason": "service",
+       "type": "fee",
+       "amount": 60.05
+      },
+      {
+       "reason": "face_value_tax",
+       "type": "tax",
+       "amount": 32.95
+      },
+      {
+       "reason": "order_processing",
+       "type": "fee",
+       "subType": "default",
+       "amount": 0.0
+      }
+     ],
+     "sellableQuantities": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+     ]
+    },
+    {
+     "schema": "urn:com.ticketmaster.services:schema:ismds:EventOffer:1.0",
+     "meta": {
+      "type": "urn:com.ticketmaster.services:type:ismds:EventOffer",
+      "modified": "2026-11-14T04:34:37.369644126Z",
+      "expires": "2026-11-14T04:44:37.369644126Z"
+     },
+     "offerId": "GJ6DEMJRIYYDAMBQGAYDAN34GMZTALRVGB6DMMBOGIYHYNBOGAYHYMZTFYYDK7D4PR6A",
+     "name": "Standard Admission",
+     "rank": 0,
+     "online": true,
+     "protected": false,
+     "rollup": false,
+     "inventoryType": "primary",
+     "offerType": "standard",
+     "ticketTypeId": "211F00000007",
+     "ticketTypeUnsoldQualifier": "PLATINUM2AVAIL",
+     "description": "Standard Admission",
+     "currency": "USD",
+     "listPrice": 334.5,
+     "faceValue": 334.5,
+     "totalPrice": 427.75,
+     "noChargesPrice": 330.5,
+     "charges": [
+      {
+       "reason": "service",
+       "type": "fee",
+       "amount": 60.2
+      },
+      {
+       "reason": "face_value_tax",
+       "type": "tax",
+       "amount": 33.05
+      },
+      {
+       "reason": "order_processing",
+       "type": "fee",
+       "subType": "default",
+       "amount": 0.0
+      }
+     ],
+     "sellableQuantities": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+     ]
+    },
+    {
+     "schema": "urn:com.ticketmaster.services:schema:ismds:EventOffer:1.0",
+     "meta": {
+      "type": "urn:com.ticketmaster.services:type:ismds:EventOffer",
+      "modified": "2026-11-14T04:34:37.369644126Z",
+      "expires": "2026-11-14T04:44:37.369644126Z"
+     },
+     "offerId": "GJ6DEMJRIYYDAMBQGAYDAN34GMZTSLRVGB6DMMJOHA2XYNBOGAYHYMZTFY4TK7D4PR6A",
+     "name": "Standard Admission",
+     "rank": 0,
+     "online": true,
+     "protected": false,
+     "rollup": false,
+     "inventoryType": "primary",
+     "offerType": "standard",
+     "ticketTypeId": "211F00000007",
+     "ticketTypeUnsoldQualifier": "PLATINUM2AVAIL",
+     "description": "Standard Admission",
+     "currency": "USD",
+     "listPrice": 343.5,
+     "faceValue": 343.5,
+     "totalPrice": 439.3,
+     "noChargesPrice": 339.5,
+     "charges": [
+      {
+       "reason": "service",
+       "type": "fee",
+       "amount": 61.85
+      },
+      {
+       "reason": "face_value_tax",
+       "type": "tax",
+       "amount": 33.95
+      },
+      {
+       "reason": "order_processing",
+       "type": "fee",
+       "subType": "default",
+       "amount": 0.0
+      }
+     ],
+     "sellableQuantities": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+     ]
+    },
+    {
+     "schema": "urn:com.ticketmaster.services:schema:ismds:EventOffer:1.0",
+     "meta": {
+      "type": "urn:com.ticketmaster.services:type:ismds:EventOffer",
+      "modified": "2026-11-14T04:34:37.369644126Z",
+      "expires": "2026-11-14T04:44:37.369644126Z"
+     },
+     "offerId": "GJ6DEQJRGAYDAMBQGAYDS7BVGE",
+     "name": "Mastercard Collection Preferred Tickets",
+     "rank": 0,
+     "online": true,
+     "protected": true,
+     "rollup": false,
+     "inventoryType": "primary",
+     "offerType": "standard",
+     "ticketTypeId": "02A100000009",
+     "ticketTypeUnsoldQualifier": "MCPCHOLD",
+     "auditPriceLevel": "4",
+     "priceLevelId": "51",
+     "priceLevelSecname": "P4",
+     "description": "Mastercard Collection Preferred Tickets",
+     "currency": "USD",
+     "listPrice": 334.95,
+     "faceValue": 334.95,
+     "totalPrice": 408.4,
+     "noChargesPrice": 330.95,
+     "charges": [
+      {
+       "reason": "face_value_tax",
+       "type": "tax",
+       "amount": 33.1
+      },
+      {
+       "reason": "service",
+       "type": "fee",
+       "amount": 40.35
+      },
+      {
+       "reason": "order_processing",
+       "type": "fee",
+       "subType": "default",
+       "amount": 0.0
+      }
+     ],
+     "sellableQuantities": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+     ]
+    },
+    {
+     "schema": "urn:com.ticketmaster.services:schema:ismds:EventOffer:1.0",
+     "meta": {
+      "type": "urn:com.ticketmaster.services:type:ismds:EventOffer",
+      "modified": "2026-11-14T04:34:37.369644126Z",
+      "expires": "2026-11-14T04:44:37.369644126Z"
+     },
+     "offerId": "GJ6DGMRTGAYDAMBQGAYDC7BVGU",
+     "name": "Side View Offer",
+     "rank": 4,
+     "online": true,
+     "protected": false,
+     "rollup": false,
+     "inventoryType": "primary",
+     "offerType": "standard",
+     "ticketTypeId": "032300000001",
+     "ticketTypeUnsoldQualifier": "SIDEHOLD",
+     "auditPriceLevel": "8",
+     "priceLevelId": "55",
+     "priceLevelSecname": "P8",
+     "description": "Side View Offer",
+     "currency": "USD",
+     "listPrice": 234.95,
+     "faceValue": 234.95,
+     "totalPrice": 295.35,
+     "noChargesPrice": 230.95,
+     "charges": [
+      {
+       "reason": "service",
+       "type": "fee",
+       "amount": 37.3
+      },
+      {
+       "reason": "order_processing",
+       "type": "fee",
+       "subType": "default",
+       "amount": 0.0
+      },
+      {
+       "reason": "face_value_tax",
+       "type": "tax",
+       "amount": 23.1
+      }
+     ],
+     "sellableQuantities": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+     ]
+    }
+   ]
+  }
+ }
+}

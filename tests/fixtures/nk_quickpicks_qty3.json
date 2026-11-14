@@ -1,0 +1,125 @@
+{
+ "_source_url": "https://services.ticketmaster.com/api/ismds/event/2000655CAB442FB5/quickpicks?show=places+maxQuantity+sections&mode=primary%3Appsectionrow+resale%3Aga_areas+platinum%3Aall&qty=3&q=not%28%27accessible%27%29&includeStandard=true&includeResale=false&includePlatinumInventoryType=false&ticketTypes=211F00000007%2C000000000001&embed=area&embed=offer&embed=description&resaleChannelId=internal.ecommerce.consumer.desktop.web.browser.ticketmaster.us&limit=40&offset=0&sort=noTaxTotalprice",
+ "_trimmed": "Trimmed for tests: dropped _links, alternateIds, maps/description/area embeds and apikey/apisecret URL params.",
+ "response": {
+  "schema": "urn:com.ticketmaster.services:schema:ismds:QuickPicks:4.0",
+  "meta": {
+   "type": "urn:com.ticketmaster.services:type:ismds:QuickPicks",
+   "modified": "2026-11-14T04:41:59.150268733Z",
+   "expires": "2026-11-14T04:42:59.150268733Z"
+  },
+  "eventId": "2000655CAB442FB5",
+  "offset": 0,
+  "total": 2,
+  "picks": [
+   {
+    "type": "seat",
+    "selection": "standard",
+    "quality": 0.936264,
+    "section": "123",
+    "row": "M",
+    "offerGroups": [
+     {
+      "offers": [
+       "GJ6DEMJRIYYDAMBQGAYDAN34GM3TSLRVGB6DMOJOGA2XYNBOGAYHYMZXFY4TK7D4PR6A"
+      ],
+      "places": [
+       "GEZDGOSNHI2Q",
+       "GEZDGOSNHI3A",
+       "GEZDGOSNHI3Q"
+      ],
+      "seats": [
+       "5",
+       "6",
+       "7"
+      ]
+     }
+    ],
+    "area": "2",
+    "descriptionId": "IE5DE",
+    "maxQuantity": 4
+   },
+   {
+    "type": "seat",
+    "selection": "standard",
+    "quality": 0.056319,
+    "section": "101",
+    "row": "N",
+    "offerGroups": [
+     {
+      "offers": [
+       "GJ6DEMJRIYYDAMBQGAYDAN34GM3TSLRVGB6DMOJOGA2XYNBOGAYHYMZXFY4TK7D4PR6A"
+      ],
+      "places": [
+       "GEYDCOSOHIYTE",
+       "GEYDCOSOHIYTG",
+       "GEYDCOSOHIYTI"
+      ],
+      "seats": [
+       "12",
+       "13",
+       "14"
+      ]
+     }
+    ],
+    "area": "2",
+    "descriptionId": "IE5DE",
+    "maxQuantity": 3
+   }
+  ],
+  "_embedded": {
+   "offer": [
+    {
+     "schema": "urn:com.ticketmaster.services:schema:ismds:EventOffer:1.0",
+     "meta": {
+      "type": "urn:com.ticketmaster.services:type:ismds:EventOffer",
+      "modified": "2026-11-14T04:41:59.150268733Z",
+      "expires": "2026-11-14T04:51:59.150268733Z"
+     },
+     "offerId": "GJ6DEMJRIYYDAMBQGAYDAN34GM3TSLRVGB6DMOJOGA2XYNBOGAYHYMZXFY4TK7D4PR6A",
+     "name": "Standard Admission",
+     "rank": 0,
+     "online": true,
+     "protected": false,
+     "rollup": false,
+     "inventoryType": "primary",
+     "offerType": "standard",
+     "ticketTypeId": "211F00000007",
+     "ticketTypeUnsoldQualifier": "PLATINUM2AVAIL",
+     "description": "Standard Admission",
+     "currency": "USD",
+     "listPrice": 383.5,
+     "faceValue": 383.5,
+     "totalPrice": 490.5,
+     "noChargesPrice": 379.5,
+     "charges": [
+      {
+       "reason": "service",
+       "type": "fee",
+       "amount": 69.05
+      },
+      {
+       "reason": "face_value_tax",
+       "type": "tax",
+       "amount": 37.95
+      },
+      {
+       "reason": "order_processing",
+       "type": "fee",
+       "subType": "default",
+       "amount": 0.0
+      }
+     ],
+     "sellableQuantities": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+     ]
+    }
+   ]
+  }
+ }
+}
