@@ -40,9 +40,12 @@ Environment=DISPLAY=:99
 Environment=XAUTHORITY=%h/repos/em_ticket_scrape/.nas/xauthority
 # The real $HOME and /tmp are world-writable on UGOS, and Chromium writes its NSS database
 # (~/.local/share/pki) and Playwright its temp dirs there, so point both into the 0700
-# project. (.env paths must therefore be absolute, not ~/…). deploy/nas/run.sh sets the same.
+# project. (.env paths must therefore be absolute, not ~/…). UGOS's /etc/pulse/client.conf
+# sets cookie-file = /tmp/.config/pulse-cookie, which Chromium's audio code would create in
+# the shared /tmp; PULSE_COOKIE overrides it. deploy/nas/run.sh sets the same.
 Environment=HOME=%h/repos/em_ticket_scrape/.nas/home
 Environment=TMPDIR=%h/repos/em_ticket_scrape/.nas/tmp
+Environment=PULSE_COOKIE=%h/repos/em_ticket_scrape/.nas/home/pulse-cookie
 UMask=0077
 # $HOME and ~/repos are 0777 on UGOS: warn loudly in the journal if they (or the dirs down to
 # the project and unit dirs) are writable by others again, e.g. after a UGOS update. Only a

@@ -10,6 +10,7 @@ NAS=$ROOT/.nas
 [[ -x $ROOT/.venv/bin/ticket-poller ]] || { echo "run deploy/nas/install.sh first" >&2; exit 1; }
 cd -- "$ROOT"
 # Keep these in sync with the Environment= lines in ticket-poller.service.
-export PYTHONUNBUFFERED=1 DISPLAY=:99 XAUTHORITY=$NAS/xauthority HOME=$NAS/home TMPDIR=$NAS/tmp
+export PYTHONUNBUFFERED=1 DISPLAY=:99 XAUTHORITY=$NAS/xauthority HOME=$NAS/home TMPDIR=$NAS/tmp \
+    PULSE_COOKIE=$NAS/home/pulse-cookie
 umask 077
 exec "$ROOT/.venv/bin/ticket-poller" "$@"

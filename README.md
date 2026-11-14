@@ -157,7 +157,9 @@ of the desktop, headed under a virtual display (Xvfb). `deploy/nas/` holds that 
   the polls fail for lack of a display (backoff, admin alert), the browser is closed, and
   the next poll after Xvfb is back relaunches it. It sets `DISPLAY=:99` and `XAUTHORITY`,
   points `HOME` and `TMPDIR` at `.nas/home` and `.nas/tmp` (Chromium and Playwright write
-  there; UGOS creates dirs in the real home 0777, and `/tmp` is shared), warns in the
+  there; UGOS creates dirs in the real home 0777, and `/tmp` is shared), and `PULSE_COOKIE`
+  at `.nas/home/pulse-cookie` (UGOS's `/etc/pulse/client.conf` would put Chromium's audio
+  cookie in `/tmp/.config`), warns in the
   journal at each start if the home dirs are writable by others again (see below), is
   capped at `MemoryHigh=1.5G` / `MemoryMax=2.5G` and is `WantedBy=default.target`.
 - `run.sh`: runs a `ticket-poller` command by hand in the service's environment.
@@ -221,7 +223,7 @@ deploy/nas/install.sh --uninstall       # disable, stop and remove the units (st
 
 There is no `uv` on the NAS PATH: use `deploy/nas/run.sh …` for the commands in
 [Setup](#setup) (it runs `.venv/bin/ticket-poller` with the unit's `DISPLAY`, `XAUTHORITY`,
-`HOME` and `TMPDIR`). Like the desktop installer, `install.sh` is idempotent, never enables or
+`HOME`, `TMPDIR` and `PULSE_COOKIE`). Like the desktop installer, `install.sh` is idempotent, never enables or
 starts anything, and should be re-run after every push. It checks that the in-project uv,
 Chromium (the revision `uv.lock`'s Playwright needs) and Xvfb exist and load all their
 libraries, fixes the modes of the dirs below `$HOME` (above), warns about linger and the `.env` overrides,
