@@ -99,6 +99,8 @@ def _describe(exc: BaseException) -> str:
             # httpx transport errors and socket errors carry no URL, but stay terse anyway.
             detail = str(exc).splitlines()[0] if str(exc) else ""
             return f"{type(exc).__name__}: {detail}" if detail else type(exc).__name__
+        case ValueError():  # raised locally with secret-free messages (e.g. "no recipients")
+            return f"{type(exc).__name__}: {exc}"
         case _:
             return type(exc).__name__
 
@@ -107,7 +109,7 @@ def _describe(exc: BaseException) -> str:
 
 
 class EmailSender(Protocol):
-    def send(self, email: Email, to: Sequence[str]) -> None:
+    def send(self, email: Email, *, to: Sequence[str]) -> None:
         """Deliver one message (one attempt); raise on failure."""
         ...
 
@@ -158,7 +160,7 @@ class SmtpEmailSender:
         message.set_content(email.body)
         return message
 
-    def send(self, email: Email, to: Sequence[str]) -> None:
+    def send(self, email: Email, *, to: Sequence[str]) -> None:
         if not to:
             raise ValueError("no recipients")
         message = self.build_message(email, to)
@@ -332,17 +334,21 @@ class Notifier:
         self,
         kind: NoticeKind,
         *,
+        to: Sequence[str],
         email: Email | None = None,
         push: Push | None = None,
-        to: Sequence[str] = (),
     ) -> Delivery:
         email_ok = push_ok = None
-        if email is not None:
+        if email is not None and not to:
+            log.error("%s email not sent: no recipients", kind.value)
+            email_ok = False
+            self._record(kind, Channel.EMAIL, email_ok, email.subject)
+        elif email is not None:
             email_ok = self._attempt(
                 kind,
                 Channel.EMAIL,
                 email.subject,
-                lambda: self._email_sender.send(email, to),
+                lambda: self._email_sender.send(email, to=to),
                 SMTP_RETRY,
                 smtp_retryable,
             )

@@ -25,9 +25,9 @@ class FakeNotifier:
         self,
         kind: NoticeKind,
         *,
+        to: Sequence[str],
         email: Email | None = None,
         push: Push | None = None,
-        to: Sequence[str] = (),
     ) -> Delivery:
         self.sent.append((kind, email, push, to))
         return Delivery(

@@ -262,7 +262,7 @@ class TestSmtpEmailSender:
     def test_sends_plain_text_over_starttls(self) -> None:
         server = FakeSmtpServer()
 
-        smtp_sender(server).send(EMAIL, ["a@example.com", "b@example.com"])
+        smtp_sender(server).send(EMAIL, to=["a@example.com", "b@example.com"])
 
         assert server.connections == [("smtp.gmail.com", 587, 20.0)]
         assert isinstance(server.tls[0], ssl.SSLContext)
@@ -280,7 +280,7 @@ class TestSmtpEmailSender:
 
     def test_needs_recipients(self) -> None:
         with pytest.raises(ValueError, match="no recipients"):
-            smtp_sender(FakeSmtpServer()).send(EMAIL, [])
+            smtp_sender(FakeSmtpServer()).send(EMAIL, to=[])
 
 
 def make_notifier(
@@ -354,12 +354,33 @@ class TestNotifierEmail:
         assert "check SENDER_EMAIL and SENDER_APP_PASSWORD" in notify_logs.text
         assert_no_secrets(notify_logs.text)
 
+    def test_no_recipients_fails_without_attempting(
+        self, notify_logs: pytest.LogCaptureFixture
+    ) -> None:
+        server = FakeSmtpServer()
+        recorded: list[bool] = []
+        notifier = make_notifier(smtp=server, audit=lambda *args: recorded.append(args[2]))
+
+        delivery = notifier.send(NoticeKind.ALERT, email=EMAIL, to=[])
+
+        assert delivery == Delivery(email=False, push=None)
+        assert server.connections == []
+        assert recorded == [False]
+        assert "alert email not sent: no recipients" in notify_logs.text
+
+    def test_local_value_errors_are_described(self, notify_logs: pytest.LogCaptureFixture) -> None:
+        email = Exploding(ValueError("bad header"))
+        notifier = Notifier(email, email, email, stop=threading.Event(), wait=RecordingWait())
+
+        assert notifier.send(NoticeKind.ALERT, email=EMAIL, to=RECIPIENTS).email is False
+        assert "ValueError: bad header" in notify_logs.text
+
 
 class TestNotifierPush:
     def test_ntfy_json_publish_keeps_topic_out_of_the_url(self, http: HttpFactory) -> None:
         fake, client = http()
 
-        delivery = make_notifier(client=client).send(NoticeKind.ALERT, push=PUSH)
+        delivery = make_notifier(client=client).send(NoticeKind.ALERT, push=PUSH, to=())
 
         assert delivery == Delivery(email=None, push=True)
         (request,) = fake.requests
@@ -404,7 +425,7 @@ class TestNotifierPush:
     ) -> None:
         fake, client = http()
 
-        make_notifier(client=client).send(kind, push=PUSH)
+        make_notifier(client=client).send(kind, push=PUSH, to=())
 
         assert fake.bodies()[0]["topic"] == topic
 
@@ -424,7 +445,7 @@ class TestNotifierPush:
     ) -> None:
         fake, client = http(*script)
 
-        delivery = make_notifier(client=client).send(NoticeKind.ALERT, push=PUSH)
+        delivery = make_notifier(client=client).send(NoticeKind.ALERT, push=PUSH, to=())
 
         assert delivery.push is ok
         assert len(fake.requests) == requests
@@ -435,7 +456,7 @@ class TestNotifierPush:
         error = httpx.ConnectError(f"cannot reach https://ntfy.sh/{NTFY_TOPIC}?auth={NTFY_TOKEN}")
         _, client = http(error, error, 404)
 
-        delivery = make_notifier(client=client).send(NoticeKind.ALERT, push=PUSH)
+        delivery = make_notifier(client=client).send(NoticeKind.ALERT, push=PUSH, to=())
 
         assert delivery.push is False
         assert "HTTP 404" in notify_logs.text
@@ -482,12 +503,13 @@ class TestHealthcheckPinger:
 class Exploding:
     """A sender that fails with an unexpected error whose message contains secrets."""
 
-    def __init__(self) -> None:
+    def __init__(self, error: Exception | None = None) -> None:
         self.calls = 0
+        self.error = error or RuntimeError(f"unexpected {APP_PASSWORD} {NTFY_TOPIC} {HC_URL}")
 
-    def send(self, *args: object) -> None:
+    def send(self, *args: object, **kwargs: object) -> None:
         self.calls += 1
-        raise RuntimeError(f"unexpected {APP_PASSWORD} {NTFY_TOPIC} {HC_URL}")
+        raise self.error
 
 
 class TestNotifier:
@@ -633,8 +655,8 @@ class TestFactories:
         fake, client = http(200, 400)
         notifier = build_notifier(settings, client, stop=threading.Event())
 
-        alert = notifier.send(NoticeKind.ALERT, push=PUSH)
-        ops = notifier.send(NoticeKind.OUTAGE, push=PUSH)
+        alert = notifier.send(NoticeKind.ALERT, push=PUSH, to=())
+        ops = notifier.send(NoticeKind.OUTAGE, push=PUSH, to=())
 
         assert (alert.push, ops.push) == (True, False)
         assert [body["topic"] for body in fake.bodies()] == [NTFY_TOPIC, NTFY_OPS_TOPIC]
@@ -647,7 +669,9 @@ class TestFactories:
         settings = load_settings(make_env_file(NTFY_OPS_TOPIC=None))
         fake, client = http()
 
-        build_notifier(settings, client, stop=threading.Event()).send(NoticeKind.CANARY, push=PUSH)
+        build_notifier(settings, client, stop=threading.Event()).send(
+            NoticeKind.CANARY, push=PUSH, to=()
+        )
 
         assert fake.bodies()[0]["topic"] == NTFY_TOPIC
 
