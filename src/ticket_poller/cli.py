@@ -7,6 +7,7 @@ import os
 import sys
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
+from datetime import UTC, datetime
 from enum import IntEnum
 from pathlib import Path
 from typing import Final
@@ -14,6 +15,8 @@ from typing import Final
 from ticket_poller import __version__
 from ticket_poller.config import ConfigError, Settings, load_settings, secure_runtime
 from ticket_poller.logsetup import configure_logging
+from ticket_poller.status import render_status
+from ticket_poller.store import NoStateError, Store, StoreError
 
 log = logging.getLogger(__name__)
 
@@ -71,7 +74,15 @@ def _cmd_canary_now(args: argparse.Namespace, settings: Settings) -> int:
 
 
 def _cmd_status(args: argparse.Namespace, settings: Settings) -> int:
-    return _not_implemented("status", "T3")
+    try:
+        with Store.open_readonly(settings.db_path) as store:
+            print(render_status(store, settings, datetime.now(UTC)))
+    except NoStateError as exc:
+        print(exc)
+    except StoreError as exc:
+        log.error("%s", exc)
+        return ExitCode.CRASH
+    return ExitCode.OK
 
 
 def build_parser() -> argparse.ArgumentParser:

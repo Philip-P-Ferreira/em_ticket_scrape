@@ -90,7 +90,7 @@ class TestMain:
     ) -> None:
         make_env_file()
 
-        assert main(["status"]) == ExitCode.CRASH
+        assert main(["run"]) == ExitCode.CRASH
         assert "not implemented yet" in capsys.readouterr().err
         for name in ("state", "state/debug", "profile"):
             assert stat.S_IMODE((tmp_path / name).stat().st_mode) == 0o700
