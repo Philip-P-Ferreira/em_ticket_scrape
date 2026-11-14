@@ -5,6 +5,7 @@ import fcntl
 import logging
 import os
 import sys
+import threading
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from datetime import UTC, datetime
@@ -12,9 +13,12 @@ from enum import IntEnum
 from pathlib import Path
 from typing import Final
 
-from ticket_poller import __version__
+import httpx
+
+from ticket_poller import __version__, messages, notify
 from ticket_poller.config import ConfigError, Settings, load_settings, secure_runtime
 from ticket_poller.logsetup import configure_logging
+from ticket_poller.models import Channel
 from ticket_poller.status import render_status
 from ticket_poller.store import NoStateError, Store, StoreError
 
@@ -65,12 +69,42 @@ def _cmd_poll_once(args: argparse.Namespace, settings: Settings) -> int:
     return _not_implemented("poll-once", "T5")
 
 
+def _send_to_admin(
+    settings: Settings,
+    kind: messages.NoticeKind,
+    email: messages.Email | None,
+    push: messages.Push | None,
+) -> notify.Delivery:
+    """Send to ADMIN_EMAIL and the ops topic, then print the per-channel result."""
+    with httpx.Client() as client:
+        notifier = notify.build_notifier(settings, client, stop=threading.Event())
+        delivery = notifier.send(kind, email=email, push=push, to=[settings.admin_email])
+    for channel in Channel:
+        result = delivery.result(channel)
+        print(f"{channel.value}: {'skipped' if result is None else 'ok' if result else 'FAILED'}")
+    return delivery
+
+
 def _cmd_test_notify(args: argparse.Namespace, settings: Settings) -> int:
-    return _not_implemented("test-notify", "T4")
+    ctx = messages.MessageContext.from_settings(settings)
+    notice = messages.selftest_notice(
+        settings_summary=settings.summary(), ctx=ctx, now=datetime.now(UTC)
+    )
+    email = None if args.no_email else notice.email
+    push = None if args.no_push else notice.push
+    delivery = _send_to_admin(settings, notice.kind, email, push)
+    return ExitCode.CRASH if delivery.any_failed else ExitCode.OK
 
 
 def _cmd_canary_now(args: argparse.Namespace, settings: Settings) -> int:
-    return _not_implemented("canary-now", "T4")
+    if not args.print:
+        return _not_implemented("canary-now (sending; use --print)", "T3/T6")
+    # TODO(T3/T6): build the report from the store's poll statistics.
+    print("note: poll statistics are not wired yet (store: T3); report is empty", file=sys.stderr)
+    report = messages.CanaryReport(now=datetime.now(UTC))
+    email = messages.canary(report, messages.MessageContext.from_settings(settings))
+    print(f"Subject: {email.subject}\n\n{email.body}", end="")
+    return ExitCode.OK
 
 
 def _cmd_status(args: argparse.Namespace, settings: Settings) -> int:
