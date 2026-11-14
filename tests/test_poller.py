@@ -17,7 +17,8 @@ from ticket_poller.config import Settings, load_settings
 from ticket_poller.models import CapturedResponse, Channel, FetchResult, PollOutcome
 from ticket_poller.notify import Notifier
 from ticket_poller.parsing import parse_inventory
-from ticket_poller.poller import Poller, PollReport, render_report
+from ticket_poller.poller import Poller, PollReport
+from ticket_poller.report import render_report
 from ticket_poller.rules import candidates, compute_baseline, evaluate
 from ticket_poller.store import Store, key_matches
 

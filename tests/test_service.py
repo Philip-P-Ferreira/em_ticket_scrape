@@ -40,8 +40,8 @@ from ticket_poller.poller import (
     Poller,
     PollReport,
     audit_to,
-    render_report,
 )
+from ticket_poller.report import render_report
 from ticket_poller.store import Store
 from ticket_poller.watchdog import Watchdog
 

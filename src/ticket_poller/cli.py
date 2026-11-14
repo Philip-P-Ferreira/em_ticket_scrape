@@ -20,6 +20,7 @@ from ticket_poller import __version__, dumps, fetcher, messages, notify, poller
 from ticket_poller.config import ConfigError, Settings, load_settings, secure_runtime
 from ticket_poller.logsetup import configure_logging
 from ticket_poller.models import Channel, NoticeKind
+from ticket_poller.report import render_report
 from ticket_poller.schedule import SystemClock
 from ticket_poller.status import canary_report, render_status
 from ticket_poller.store import NoStateError, Store, StoreError
@@ -157,7 +158,7 @@ def _cmd_poll_once(args: argparse.Namespace, settings: Settings) -> int:
             log.error("cannot save responses: %s", exc)
             return ExitCode.CRASH
         print(f"saved {len(saved)} responses to {args.save}")
-    print(poller.render_report(report, settings))
+    print(render_report(report, settings))
     return ExitCode.OK if report.succeeded else ExitCode.CRASH
 
 
