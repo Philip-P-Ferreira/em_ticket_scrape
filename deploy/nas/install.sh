@@ -46,8 +46,11 @@ UV=$NAS/bin/uv
 XVFB=$NAS/xvfb/root/usr/bin/Xvfb
 [[ -x $UV ]] || die "$UV is missing (in-project uv; see README, Running on the NAS)"
 [[ -x $XVFB ]] || die "$XVFB is missing (Xvfb extracted from the Debian xvfb .deb)"
-compgen -G "$NAS/ms-playwright/chromium-*/chrome-linux64/chrome" >/dev/null \
-    || die "no Playwright Chromium under $NAS/ms-playwright"
+# Debian's Chromium (not Playwright's Chrome for Testing, which Ticketmaster blocked on the
+# NAS), started through deploy/nas/chromium.sh.
+CHROME=$ROOT/deploy/nas/chromium.sh
+CHROME_BINARY=$NAS/chromium/root/usr/lib/chromium/chromium
+[[ -x $CHROME_BINARY ]] || die "$CHROME_BINARY is missing; fetch it with deploy/nas/fetch-chromium.sh"
 # Xvfb needs the system xkbcomp; xvfb-helper.sh needs xauth and mcookie.
 for tool in /usr/bin/xkbcomp /usr/bin/xauth /usr/bin/mcookie /usr/bin/ldd; do
     [[ -x $tool ]] || die "$tool is missing"
@@ -73,26 +76,13 @@ echo "==> Syncing runtime dependencies from uv.lock (in-project uv and Python)"
 python=$(readlink -f -- "$ROOT/.venv/bin/python")
 [[ $python == "$NAS/python/"* ]] || die ".venv uses $python, not the Python in $NAS/python"
 
-# The Chromium build must match the Playwright version in uv.lock.
-revision=$("$ROOT/.venv/bin/python" - <<'PY'
-import json
-from pathlib import Path
-
-import playwright
-
-browsers = Path(playwright.__file__).parent / "driver/package/browsers.json"
-print(next(b["revision"] for b in json.loads(browsers.read_text())["browsers"]
-           if b["name"] == "chromium"))
-PY
-)
-CHROME=$NAS/ms-playwright/chromium-$revision/chrome-linux64/chrome
-[[ -x $CHROME ]] || die "Playwright in uv.lock needs $CHROME; install it with:
-  PLAYWRIGHT_BROWSERS_PATH=$NAS/ms-playwright $ROOT/.venv/bin/playwright install --no-shell chromium
-then point CHROMIUM_PATH in .env at it"
-for binary in "$CHROME" "$XVFB"; do
-    libs=$(missing_libs "$binary")
-    [[ -z $libs ]] || die "$binary is missing shared libraries (a UGOS update?):"$'\n'"$libs"
+for binary in "$CHROME_BINARY" "$XVFB"; do
+    libs=$(LD_LIBRARY_PATH=$NAS/chromium/root/usr/lib/x86_64-linux-gnu missing_libs "$binary")
+    [[ -z $libs ]] || die "$binary is missing shared libraries (a UGOS update?):"$'\n'"$libs
+re-run deploy/nas/fetch-chromium.sh (it fetches the libraries UGOS lacks)"
 done
+chrome_version=$("$CHROME" --version) || die "$CHROME doesn't start"
+echo "==> Browser: $chrome_version (keep its major version in step with the desktop's chromium)"
 
 echo "==> Installing ${UNITS[*]} into $UNIT_DIR"
 mkdir -p -- "$UNIT_DIR"
@@ -171,7 +161,7 @@ for key in ("CHROMIUM_PATH", "STATE_DIR", "BROWSER_PROFILE_DIR"):
     if (env.get(key) or "").strip().startswith("~"):
         warn(f"{key} must be an absolute path: the service's HOME is .nas/home")
 if path("CHROMIUM_PATH") != chrome.resolve():
-    warn(f"CHROMIUM_PATH must be {chrome} (the Chromium matching Playwright)")
+    warn(f"CHROMIUM_PATH must be {chrome} (Debian's Chromium from fetch-chromium.sh)")
 for key in ("STATE_DIR", "BROWSER_PROFILE_DIR"):
     value = path(key)
     if value is None or not value.is_relative_to(root):

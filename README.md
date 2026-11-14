@@ -175,11 +175,26 @@ of the desktop, headed under a virtual display (Xvfb). `deploy/nas/` holds that 
 
 UGOS has no Chromium or Xvfb, and its apt/dpkg state is broken (don't `apt install`), so
 everything runs from in-project copies under `~/repos/em_ticket_scrape/.nas/` on the NAS:
-`bin/uv`, `python/` (the `.venv` links into it), `ms-playwright/chromium-1255/` (Playwright's
-Chrome for Testing, matching `playwright` in `uv.lock`) and `xvfb/root/usr/bin/Xvfb`
-(extracted from Debian's `xvfb` .deb; it uses the system xkbcomp, xkb-data and xauth).
-`push.sh` never overwrites `.nas`, `.venv`, `.env` or the state dir; `install.sh` only
-syncs `.venv` and creates `.nas/home` and `.nas/tmp`.
+`bin/uv`, `python/` (the `.venv` links into it), `chromium/` (Debian 12's Chromium, see
+below) and `xvfb/root/usr/bin/Xvfb` (extracted from Debian's `xvfb` .deb; it uses the system
+xkbcomp, xkb-data and xauth). `push.sh` never overwrites `.nas`, `.venv`, `.env` or the
+state dir; `install.sh` only syncs `.venv` and creates `.nas/home` and `.nas/tmp`.
+
+**The browser is Debian's Chromium, matched to the desktop's.** With Playwright's Chrome
+for Testing (159) the NAS was hard-blocked ("Your Browsing Activity Has Been Paused",
+`action="block"`, document 401/403) on the very first request from a fresh profile, while
+the desktop on the same public IP kept polling fine. Debian bookworm's `chromium` build of
+the desktop's version (156.0.8078.79, a distro build like Arch's) passed at once with a
+fresh profile; it sends byte-for-byte the desktop's request headers (User-Agent,
+`sec-ch-ua` brands, `Accept-Language` and their order), which Chrome for Testing 159 didn't.
+`deploy/nas/fetch-chromium.sh [VERSION]` downloads the `chromium` and `chromium-common` .debs
+from bookworm-security (newest by default) plus the four libraries UGOS lacks (`apt-get
+download`, no root, dpkg untouched), extracts them into `.nas/chromium-<version>/` and
+points the `.nas/chromium` link at it; `deploy/nas/chromium.sh` (the `CHROMIUM_PATH`) starts
+it with those libraries and without Debian's launcher flags (Arch's launcher adds none).
+Keep its major version in step with the desktop's `chromium --version`: re-run
+`fetch-chromium.sh` when the desktop moves to a new major version, then restart the
+service. The old `.nas/ms-playwright/` is unused and can be deleted.
 
 UGOS creates `$HOME`, `~/repos` and new dirs in them 0777 with no sticky bit, as `ls -l`
 shows them (the home also carries a UGOS ACL, the `system.ugacl_self` xattr enforced by the
@@ -204,7 +219,7 @@ plus these overrides (absolute paths: the service's `HOME` is `.nas/home`, so `~
 point there):
 
 ```sh
-CHROMIUM_PATH=/home/pferreira/repos/em_ticket_scrape/.nas/ms-playwright/chromium-1255/chrome-linux64/chrome
+CHROMIUM_PATH=/home/pferreira/repos/em_ticket_scrape/deploy/nas/chromium.sh
 BROWSER_PROFILE_DIR=/home/pferreira/repos/em_ticket_scrape/state/chromium-profile
 STATE_DIR=/home/pferreira/repos/em_ticket_scrape/state
 BROWSER_EXTRA_ARGS=--ozone-platform=x11
@@ -220,6 +235,7 @@ starts it at boot. Enable it once on the NAS (polkit allows it without sudo):
 deploy/nas/push.sh                      # on the desktop: copy the working tree to the NAS
 ssh pferreira@phils-nas.local
 cd ~/repos/em_ticket_scrape
+deploy/nas/fetch-chromium.sh            # first time, and when the desktop's Chromium changes major
 deploy/nas/install.sh                   # uv sync with .nas/ uv+Python, install units, daemon-reload
 systemctl --user start ticket-poller-xvfb
 deploy/nas/run.sh poll-once             # dry run, in the service's environment
@@ -233,7 +249,7 @@ There is no `uv` on the NAS PATH: use `deploy/nas/run.sh …` for the commands i
 [Setup](#setup) (it runs `.venv/bin/ticket-poller` with the unit's `DISPLAY`, `XAUTHORITY`,
 `HOME`, `TMPDIR` and `PULSE_COOKIE`). Like the desktop installer, `install.sh` is idempotent, never enables or
 starts anything, and should be re-run after every push. It checks that the in-project uv,
-Chromium (the revision `uv.lock`'s Playwright needs) and Xvfb exist and load all their
+Chromium (from `fetch-chromium.sh`; it prints its version) and Xvfb exist and load all their
 libraries, fixes the modes of the dirs below `$HOME` (above), warns about linger and the `.env` overrides,
 and tells you to restart the service if it is running.
 
@@ -253,9 +269,8 @@ Ticketmaster traffic and sends duplicate alerts. Switch over in this order:
    rm ~/state-migrate.sqlite3
    ```
 
-   Do **not** copy the Chromium profile: it belongs to the desktop's Chromium version, and
-   Playwright's Chromium on the NAS is a different one. The NAS starts with a fresh profile
-   (that passed Ticketmaster's bot check in testing).
+   Do **not** copy the Chromium profile: the NAS starts with a fresh one, which passed
+   Ticketmaster's bot check with Debian's Chromium.
 3. Copy the real `.env` (mode 600) with the overrides above, then push, install and enable
    as above.
 
@@ -269,7 +284,8 @@ survived (it lives in the overlay root fs):
 
 ```sh
 cd ~/repos/em_ticket_scrape
-ldd .nas/ms-playwright/chromium-1255/chrome-linux64/chrome | grep 'not found'   # no output = OK
+LD_LIBRARY_PATH=.nas/chromium/root/usr/lib/x86_64-linux-gnu \
+  ldd .nas/chromium/root/usr/lib/chromium/chromium | grep 'not found'   # no output = OK
 ldd .nas/xvfb/root/usr/bin/Xvfb | grep 'not found'
 deploy/nas/check-perms.sh ~ ~/repos/em_ticket_scrape ~/.config/systemd/user   # no output, exit 0 = OK
 loginctl show-user pferreira -p Linger
