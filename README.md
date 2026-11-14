@@ -1,5 +1,13 @@
 # ticket-poller
 
+## Overview
+This is a fully vibe-coded repo. I gave it a fairly descriptive prompt with desired behavior, requirements, and steps to follow, but I personally wrote none of the code. It works surprisingly well, but I would never want to use this as a client/developer. It's very over-engineered, and is overall an obtuse piece of software. Though it's not the worst AI-coded project, and the overall file organization and documentation are decent. 
+
+It also is fairly configurable, with basically everything controlled through environment variables. I also learned about some new solutions like ntfy.sh and healthchecks.io for monitoring and alerting. SQLlite is also a neat technology I've never used before.
+
+Thus ends the human-written overview. Everything below this line is fully written by AI
+---------------------
+
 Polls one Ticketmaster event page (Noah Kahan, Birmingham, 2027-04-27) in a headed Chromium
 on this desktop and alerts by email and ntfy push when matching tickets appear: any resale
 listing buyable as 2 or 3, primary at ≤ $200/ticket, ≥ 20 % below the 7-day median, or
