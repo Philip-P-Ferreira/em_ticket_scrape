@@ -126,11 +126,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     configure_logging()  # bootstrap; no secret is known (or logged) before settings load
     try:
         settings = load_settings()
+        configure_logging(settings.log_level, settings.secret_values())
+        secure_runtime(settings)
     except ConfigError as exc:
         log.error("%s", exc)
         return ExitCode.CONFIG
-    configure_logging(settings.log_level, settings.secret_values())
-    secure_runtime(settings)
 
     handler: Handler = args.handler
     if not args.needs_lock:

@@ -1,3 +1,4 @@
+import errno
 import logging
 import os
 import stat
@@ -7,6 +8,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import pytest
+from pydantic import ValidationError
 
 from tests.sample_env import (
     APP_PASSWORD,
@@ -21,6 +23,7 @@ from tests.sample_env import (
 from ticket_poller.config import (
     ConfigError,
     RuleConfig,
+    Settings,
     check_env_file,
     dollars_to_cents,
     ensure_private_dir,
@@ -86,11 +89,9 @@ class TestParsing:
 
     @pytest.mark.parametrize(
         ("amount", "cents"),
-        [(Decimal("1.005"), 101), ("343.50", 34350), (383.5, 38350), (2, 200)],
+        [(Decimal("1.005"), 101), (Decimal("343.50"), 34350), (Decimal(2), 200)],
     )
-    def test_dollars_to_cents_rounds_half_up(
-        self, amount: Decimal | str | float, cents: int
-    ) -> None:
+    def test_dollars_to_cents_rounds_half_up(self, amount: Decimal, cents: int) -> None:
         assert dollars_to_cents(amount) == cents
 
     def test_comma_separated_lists(self, make_env_file: EnvFileFactory) -> None:
@@ -135,8 +136,34 @@ class TestParsing:
         assert settings.healthchecks_ping_url is not None
         assert settings.healthchecks_ping_url.get_secret_value() == HC_URL
 
-    def test_empty_optional_secret_is_unset(self, make_env_file: EnvFileFactory) -> None:
-        assert load_settings(make_env_file(NTFY_TOKEN="")).ntfy_token is None
+    @pytest.mark.parametrize("key", ["NTFY_OPS_TOPIC", "NTFY_TOKEN", "HEALTHCHECKS_PING_URL"])
+    def test_empty_optional_secret_is_unset(self, make_env_file: EnvFileFactory, key: str) -> None:
+        settings = load_settings(make_env_file(**{key: ""}))
+
+        assert getattr(settings, key.lower()) is None
+
+    def test_empty_optional_secret_in_process_environment_is_unset(
+        self, make_env_file: EnvFileFactory, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        path = make_env_file()
+        monkeypatch.setenv("NTFY_TOKEN", "")
+
+        assert load_settings(path).ntfy_token is None
+
+    def test_empty_preferred_quantities_means_none(self, make_env_file: EnvFileFactory) -> None:
+        settings = load_settings(make_env_file(PREFERRED_QUANTITIES=""))
+
+        assert settings.preferred_quantities == frozenset()
+        assert settings.rule_config().preferred_quantities == frozenset()
+
+    def test_empty_browser_extra_args_means_none(self, make_env_file: EnvFileFactory) -> None:
+        assert load_settings(make_env_file(BROWSER_EXTRA_ARGS="")).browser_extra_args == ()
+
+    def test_settings_alone_does_not_read_env_file(self, make_env_file: EnvFileFactory) -> None:
+        make_env_file()
+
+        with pytest.raises(ValidationError, match="sender_email"):
+            Settings()
 
 
 class TestValidation:
@@ -147,6 +174,9 @@ class TestValidation:
             ({"WANTED_QUANTITIES": "0,2"}, "between 1 and 8"),
             ({"WANTED_QUANTITIES": "2,9"}, "between 1 and 8"),
             ({"WANTED_QUANTITIES": ","}, "at least one quantity"),
+            ({"WANTED_QUANTITIES": ""}, "at least one quantity"),
+            ({"ALERT_RECIPIENTS": ""}, "at least one recipient"),
+            ({"POLL_INTERVAL_SECONDS": ""}, "POLL_INTERVAL_SECONDS"),
             ({"WANTED_QUANTITIES": "two"}, "WANTED_QUANTITIES"),
             ({"PRIMARY_ALERT_MAX_PRICE": "0"}, "PRIMARY_ALERT_MAX_PRICE"),
             ({"PREFERRED_MAX_PRICE": "-5"}, "PREFERRED_MAX_PRICE"),
@@ -164,6 +194,7 @@ class TestValidation:
             ({"HEALTHCHECKS_PING_URL": "hc-ping.com/abcdef"}, "http(s) URL"),
             ({"SENDER_APP_PASSWORD": None}, "SENDER_APP_PASSWORD"),
             ({"NTFY_TOPIC": None}, "NTFY_TOPIC"),
+            ({"NTFY_TOPIC": ""}, "NTFY_TOPIC"),
         ],
     )
     def test_invalid_settings_raise_config_error(
@@ -222,6 +253,13 @@ class TestEnvFilePermissions:
         with pytest.raises(ConfigError, match="not yours"):
             check_env_file(path)
 
+    @pytest.mark.skipif(os.geteuid() == 0, reason="root can read a mode-0000 file")
+    def test_unreadable_env_file(self, make_env_file: EnvFileFactory) -> None:
+        path = make_env_file(mode=0o000)
+
+        with pytest.raises(ConfigError, match=f"cannot read env file {path}: Permission denied"):
+            load_settings(path)
+
 
 class TestPrivateDirs:
     def test_secure_runtime_creates_private_dirs(
@@ -260,6 +298,37 @@ class TestPrivateDirs:
         assert _mode(directory) == 0o700
         assert not caplog.records
 
+    @pytest.mark.parametrize("key", ["STATE_DIR", "BROWSER_PROFILE_DIR"])
+    def test_dir_that_is_a_file(
+        self, make_env_file: EnvFileFactory, tmp_path: Path, key: str
+    ) -> None:
+        target = tmp_path / "a-file"
+        target.touch()
+        settings = load_settings(make_env_file(**{key: str(target)}))
+
+        with pytest.raises(ConfigError, match=f"{target}: not a directory"):
+            secure_runtime(settings)
+
+    def test_dir_under_a_file(self, tmp_path: Path) -> None:
+        (tmp_path / "a-file").touch()
+
+        with pytest.raises(ConfigError, match="a-file/sub: Not a directory"):
+            ensure_private_dir(tmp_path / "a-file" / "sub")
+
+    def test_foreign_dir_that_cannot_be_tightened(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        directory = tmp_path / "foreign"
+        directory.mkdir(mode=0o755)
+
+        def deny(self: Path, mode: int) -> None:
+            raise PermissionError(errno.EPERM, os.strerror(errno.EPERM), str(self))
+
+        monkeypatch.setattr(Path, "chmod", deny)
+
+        with pytest.raises(ConfigError, match=f"{directory}: Operation not permitted"):
+            ensure_private_dir(directory)
+
 
 class TestSecretHygiene:
     def test_summary_contains_no_secrets(self, make_env_file: EnvFileFactory) -> None:
@@ -267,12 +336,12 @@ class TestSecretHygiene:
 
         summary = settings.summary()
 
-        for secret in (*settings.secret_values(), SENDER_EMAIL, HC_UUID):
+        for secret in (*settings.secret_values(), HC_UUID):
             assert secret not in summary
         assert "SENDER_APP_PASSWORD=set" in summary
         assert "NTFY_TOPIC=set" in summary
         assert "HEALTHCHECKS_PING_URL=set" in summary
-        assert "SENDER_EMAIL=set" in summary
+        assert f"SENDER_EMAIL={SENDER_EMAIL}" in summary
         assert "WANTED_QUANTITIES=2,3" in summary
         assert "PREFERRED_MAX_PRICE=300.00" in summary
 

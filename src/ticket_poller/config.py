@@ -1,5 +1,9 @@
 """Typed settings from the environment and ``.env``, plus startup file-safety checks.
 
+``load_settings()`` is the only code path that reads the env file, and it checks the
+file's permissions first. An empty value (``KEY=``) means "none" for list settings
+and optional secrets; any other setting validates it as given instead of using the default.
+
 ``Settings`` must never be logged or formatted directly; use ``Settings.summary()``,
 which shows only non-sensitive values and reports secrets as ``set``/``unset``.
 """
@@ -42,9 +46,6 @@ PRIVATE_UMASK: Final = 0o077
 
 _EMAIL_RE: Final = re.compile(r"[^@\s,<>]+@[^@\s,<>]+\.[^@\s,<>]+")
 _HTTP_URL_RE: Final = re.compile(r"https?://[^\s/]+\S*")
-# Shown as set/unset in summary() even though they are not SecretStr (the address is
-# needed in clear text for SMTP, but the operator treats it as sensitive).
-_MASKED_IN_SUMMARY: Final = frozenset({"sender_email"})
 
 type LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
 # NoDecode: these are comma-separated in the environment, not JSON.
@@ -68,18 +69,17 @@ class RuleConfig:
     baseline_min_samples: int
 
 
-def dollars_to_cents(amount: Decimal | str | int | float) -> int:
-    """Convert a dollar amount to integer cents, rounding half-up (``Decimal(str(x))`` is exact)."""
-    return int((Decimal(str(amount)) * 100).to_integral_value(ROUND_HALF_UP))
+def dollars_to_cents(amount: Decimal) -> int:
+    """Convert a ``Decimal`` dollar amount to integer cents, rounding half-up."""
+    return int((amount * 100).to_integral_value(ROUND_HALF_UP))
 
 
 class Settings(BaseSettings):
     """All runtime configuration. Field ``foo_bar`` is read from env var ``FOO_BAR``."""
 
     model_config = SettingsConfigDict(
-        env_file=DEFAULT_ENV_FILE,
+        env_file=None,  # load_settings() passes the permission-checked file
         env_file_encoding="utf-8",
-        env_ignore_empty=True,
         extra="ignore",
         validate_default=True,
         hide_input_in_errors=True,
@@ -162,6 +162,11 @@ class Settings(BaseSettings):
         if isinstance(value, str):
             return tuple(item.strip() for item in value.split(",") if item.strip())
         return value
+
+    @field_validator("ntfy_ops_topic", "ntfy_token", "healthchecks_ping_url", mode="before")
+    @classmethod
+    def _empty_is_unset(cls, value: object) -> object:
+        return None if isinstance(value, str) and not value.strip() else value
 
     @field_validator("log_level", mode="before")
     @classmethod
@@ -312,7 +317,7 @@ class Settings(BaseSettings):
         value: object = getattr(self, name)
         if value is None:
             return "unset (uses NTFY_TOPIC)" if name == "ntfy_ops_topic" else "unset"
-        if isinstance(value, SecretStr) or name in _MASKED_IN_SUMMARY:
+        if isinstance(value, SecretStr):
             return "set"
         match value:
             case frozenset():
@@ -381,25 +386,37 @@ def load_settings(env_file: Path | None = None) -> Settings:
     path = Path(explicit).expanduser() if explicit else DEFAULT_ENV_FILE
     if explicit and not path.is_file():
         raise ConfigError(f"env file not found: {path}")
-    check_env_file(path)
     try:
+        check_env_file(path)
         return Settings(_env_file=path)
     except ValidationError as exc:
         raise ConfigError(_format_validation_error(exc)) from None
+    except OSError as exc:
+        raise ConfigError(f"cannot read env file {path}: {exc.strerror}") from exc
 
 
 def ensure_private_dir(path: Path) -> None:
-    """Create ``path`` with mode 0700, or tighten an existing directory to 0700."""
-    path.mkdir(mode=PRIVATE_DIR_MODE, parents=True, exist_ok=True)
-    mode = stat.S_IMODE(path.stat().st_mode)
-    if mode != PRIVATE_DIR_MODE:
-        path.chmod(PRIVATE_DIR_MODE)
-        if mode & 0o077:
-            log.warning("tightened permissions on %s from %03o to 700", path, mode)
+    """Create ``path`` with mode 0700, or tighten an existing directory to 0700.
+
+    Raises ``ConfigError`` if ``path`` is not a directory or cannot be created or tightened.
+    """
+    try:
+        path.mkdir(mode=PRIVATE_DIR_MODE, parents=True, exist_ok=True)
+        mode = stat.S_IMODE(path.stat().st_mode)
+        if mode != PRIVATE_DIR_MODE:
+            path.chmod(PRIVATE_DIR_MODE)
+            if mode & 0o077:
+                log.warning("tightened permissions on %s from %03o to 700", path, mode)
+    except OSError as exc:
+        reason = "not a directory" if isinstance(exc, FileExistsError) else exc.strerror
+        raise ConfigError(f"cannot use private directory {path}: {reason}") from exc
 
 
 def secure_runtime(settings: Settings) -> None:
-    """Apply ``umask 077`` and make sure the state, debug and profile dirs are private."""
+    """Apply ``umask 077`` and make sure the state, debug and profile dirs are private.
+
+    Raises ``ConfigError`` if a directory cannot be made private.
+    """
     os.umask(PRIVATE_UMASK)
     for directory in settings.private_dirs:
         ensure_private_dir(directory)

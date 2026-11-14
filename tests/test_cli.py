@@ -1,3 +1,4 @@
+import os
 import stat
 from pathlib import Path
 
@@ -65,6 +66,24 @@ class TestMain:
         assert "PREFERRED_QUANTITIES" in out
         assert NTFY_TOPIC not in out
         assert APP_PASSWORD not in out
+
+    @pytest.mark.skipif(os.geteuid() == 0, reason="root can read a mode-0000 file")
+    def test_unreadable_env_file_exits_78(
+        self, make_env_file: EnvFileFactory, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        make_env_file(mode=0o000)
+
+        assert main(["status"]) == ExitCode.CONFIG
+        assert "cannot read env file" in capsys.readouterr().out
+
+    def test_state_dir_that_is_a_file_exits_78(
+        self, make_env_file: EnvFileFactory, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        (tmp_path / "a-file").touch()
+        make_env_file(STATE_DIR=str(tmp_path / "a-file"))
+
+        assert main(["status"]) == ExitCode.CONFIG
+        assert "not a directory" in capsys.readouterr().out
 
     def test_stub_command_prepares_private_state(
         self, make_env_file: EnvFileFactory, tmp_path: Path, capsys: pytest.CaptureFixture[str]
