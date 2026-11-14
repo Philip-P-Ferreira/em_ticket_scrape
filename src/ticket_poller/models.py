@@ -25,6 +25,14 @@ class PollOutcome(StrEnum):
     BLOCKED = "blocked"
     ERROR = "error"
 
+    @property
+    def succeeded(self) -> bool:
+        """The poll read the page (OK, or PARTIAL with a gap): no failure streak or backoff."""
+        return self in SUCCESSFUL_OUTCOMES
+
+
+SUCCESSFUL_OUTCOMES: Final = frozenset({PollOutcome.OK, PollOutcome.PARTIAL})
+
 
 class ResaleCapture(StrEnum):
     NOT_ELIGIBLE = "not_eligible"

@@ -91,7 +91,7 @@ def failure_delay(outcome: PollOutcome, streak: int, timing: PollTiming) -> floa
 
 def poll_delay(outcome: PollOutcome, streak: int, timing: PollTiming, rng: random.Random) -> float:
     """Jittered delay before the next poll: the interval after success, else the backoff."""
-    if outcome in (PollOutcome.OK, PollOutcome.PARTIAL):
+    if outcome.succeeded:
         return jittered(timing.interval_s, timing.jitter_s, rng)
     delay = failure_delay(outcome, streak, timing)
     return jittered(delay, delay * FAILURE_JITTER_FRACTION, rng)

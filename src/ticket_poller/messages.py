@@ -141,7 +141,7 @@ class CanaryReport:
 
     @property
     def successful_polls(self) -> int:
-        return self.outcomes.get(PollOutcome.OK, 0) + self.outcomes.get(PollOutcome.PARTIAL, 0)
+        return sum(n for outcome, n in self.outcomes.items() if outcome.succeeded)
 
 
 # --- formatting helpers -----------------------------------------------------------------------

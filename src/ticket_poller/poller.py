@@ -57,8 +57,6 @@ log = logging.getLogger(__name__)
 RESALE_MISSING_POLLS: Final = 3
 """Consecutive MISSING polls before the ``resale_missing`` notice (§7)."""
 
-SUCCESS: Final = frozenset({PollOutcome.OK, PollOutcome.PARTIAL})
-
 MAX_WAIT_SECONDS: Final = 60.0
 """Longest single ``Event.wait`` slice: a wall-clock step is noticed within a minute."""
 
@@ -124,7 +122,7 @@ class PollReport:
 
     @property
     def succeeded(self) -> bool:
-        return self.outcome in SUCCESS
+        return self.outcome.succeeded
 
 
 def audit_to(store: Store, clock: Clock) -> AuditHook:
@@ -198,7 +196,7 @@ class Poller:
         """Now, unless a restart lands inside the persisted backoff of a failure streak."""
         state = self._db.get_state()
         last = self._db.recent_polls(1)
-        if state.consecutive_failures == 0 or not last or last[0].outcome in SUCCESS:
+        if state.consecutive_failures == 0 or not last or last[0].outcome.succeeded:
             return now
         outcome = last[0].outcome
         delay = failure_delay(outcome, self._streak(state, outcome), self._timing)

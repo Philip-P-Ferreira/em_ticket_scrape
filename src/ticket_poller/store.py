@@ -24,6 +24,7 @@ from types import TracebackType
 from typing import Any, Final, NamedTuple, Self
 
 from ticket_poller.models import (
+    SUCCESSFUL_OUTCOMES,
     SUPPORTED_QUANTITIES,
     Channel,
     InventoryType,
@@ -41,7 +42,9 @@ BUSY_TIMEOUT_MS: Final = 5000
 SNAPSHOT_QUANTITIES: Final = tuple(sorted(SUPPORTED_QUANTITIES))
 """Quantities with per-quantity cheapest-price columns in ``polls``."""
 
-_SUCCESS: Final = (PollOutcome.OK.value, PollOutcome.PARTIAL.value)
+_SUCCESS: Final = tuple(sorted(outcome.value for outcome in SUCCESSFUL_OUTCOMES))
+_SUCCEEDED: Final = f"outcome IN ({', '.join('?' * len(_SUCCESS))})"
+"""SQL condition for a successful poll; bind ``*_SUCCESS`` in its place."""
 
 MIGRATIONS: tuple[tuple[str, ...], ...] = (
     (  # v1
@@ -342,8 +345,8 @@ class Store:
         That is a successful poll whose parse was not degraded; for a resale row it must also
         have captured resale (a PARTIAL poll with resale MISSING says nothing about resale).
         """
-        sql = """SELECT MIN(started_at) FROM polls
-                 WHERE outcome IN (?, ?) AND started_at > ? AND NOT parse_degraded"""
+        sql = f"""SELECT MIN(started_at) FROM polls
+                 WHERE {_SUCCEEDED} AND started_at > ? AND NOT parse_degraded"""
         params: list[object] = [*_SUCCESS, _ts(row.last_seen_at)]
         if row.inventory_type is InventoryType.RESALE:
             sql += " AND resale_capture = ?"
@@ -439,8 +442,8 @@ class Store:
     def baseline_samples(self, since: datetime, until: datetime) -> list[int]:
         """Baseline samples of OK/PARTIAL polls with ``since <= started_at < until``."""
         rows = self._conn.execute(
-            """SELECT baseline_sample_cents FROM polls
-               WHERE outcome IN (?, ?) AND started_at >= ? AND started_at < ?
+            f"""SELECT baseline_sample_cents FROM polls
+               WHERE {_SUCCEEDED} AND started_at >= ? AND started_at < ?
                  AND baseline_sample_cents IS NOT NULL
                ORDER BY started_at""",
             (*_SUCCESS, _ts(since), _ts(until)),
@@ -455,8 +458,8 @@ class Store:
             outcomes=self._outcome_counts(start),
             last_success_at=self._last_success_at(),
             resale_captured=self._scalar(
-                """SELECT COUNT(*) FROM polls
-                   WHERE started_at >= ? AND outcome IN (?, ?) AND resale_capture = ?""",
+                f"""SELECT COUNT(*) FROM polls
+                   WHERE started_at >= ? AND {_SUCCEEDED} AND resale_capture = ?""",
                 (start, *_SUCCESS, ResaleCapture.CAPTURED.value),
             ),
             cheapest_primary=_by_qty(latest, _price_column, InventoryType.PRIMARY),
@@ -480,8 +483,8 @@ class Store:
                 "SELECT COUNT(*) FROM polls WHERE started_at >= ? AND browser_recycled", (start,)
             ),
             resale_missing=self._scalar(
-                """SELECT COUNT(*) FROM polls
-                   WHERE started_at >= ? AND outcome IN (?, ?) AND resale_capture = ?""",
+                f"""SELECT COUNT(*) FROM polls
+                   WHERE started_at >= ? AND {_SUCCEEDED} AND resale_capture = ?""",
                 (start, *_SUCCESS, ResaleCapture.MISSING.value),
             ),
             parse_warning_polls=self._scalar(
@@ -504,13 +507,13 @@ class Store:
 
     def _last_success_at(self) -> datetime | None:
         row = self._conn.execute(
-            "SELECT MAX(started_at) FROM polls WHERE outcome IN (?, ?)", _SUCCESS
+            f"SELECT MAX(started_at) FROM polls WHERE {_SUCCEEDED}", _SUCCESS
         ).fetchone()
         return _optional_ts(row[0])
 
     def _latest_success(self, start: str) -> sqlite3.Row | None:
         row: sqlite3.Row | None = self._conn.execute(
-            """SELECT * FROM polls WHERE started_at >= ? AND outcome IN (?, ?)
+            f"""SELECT * FROM polls WHERE started_at >= ? AND {_SUCCEEDED}
                ORDER BY started_at DESC, id DESC LIMIT 1""",
             (start, *_SUCCESS),
         ).fetchone()
@@ -519,7 +522,7 @@ class Store:
     def _lowest_cheapest(self, kind: InventoryType, start: str) -> dict[int, int | None]:
         columns = ", ".join(f"MIN({_price_column(kind, qty)})" for qty in SNAPSHOT_QUANTITIES)
         row = self._conn.execute(
-            f"SELECT {columns} FROM polls WHERE started_at >= ? AND outcome IN (?, ?)",
+            f"SELECT {columns} FROM polls WHERE started_at >= ? AND {_SUCCEEDED}",
             (start, *_SUCCESS),
         ).fetchone()
         return dict(zip(SNAPSHOT_QUANTITIES, row, strict=True))
@@ -697,7 +700,7 @@ def _snapshot_columns(snapshot: PriceSnapshot | None) -> dict[str, int | None]:
 def _poll_record(data: sqlite3.Row) -> PollRecord:
     outcome = PollOutcome(data["outcome"])
     snapshot = None
-    if outcome.value in _SUCCESS:
+    if outcome.succeeded:
         snapshot = PriceSnapshot(
             baseline_sample_cents=data["baseline_sample_cents"],
             primary_by_qty=_by_qty(data, _price_column, InventoryType.PRIMARY),

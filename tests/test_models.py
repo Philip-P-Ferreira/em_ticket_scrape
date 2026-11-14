@@ -3,7 +3,15 @@ from decimal import Decimal
 
 import pytest
 
-from ticket_poller.models import Baseline, InventoryType, Listing, Match, Priority, Reason
+from ticket_poller.models import (
+    Baseline,
+    InventoryType,
+    Listing,
+    Match,
+    PollOutcome,
+    Priority,
+    Reason,
+)
 
 
 def primary(
@@ -119,3 +127,10 @@ def test_models_are_slotted() -> None:
     assert not hasattr(baseline, "__dict__")
     with pytest.raises((AttributeError, TypeError)):
         baseline.extra = 1  # type: ignore[attr-defined]
+
+
+def test_only_ok_and_partial_polls_succeed() -> None:
+    assert [outcome for outcome in PollOutcome if outcome.succeeded] == [
+        PollOutcome.OK,
+        PollOutcome.PARTIAL,
+    ]

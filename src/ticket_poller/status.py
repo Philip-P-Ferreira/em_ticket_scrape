@@ -6,7 +6,7 @@ from typing import Final
 
 from ticket_poller.config import Settings
 from ticket_poller.messages import CanaryReport, PricePoint, local_time, money
-from ticket_poller.models import Baseline, Channel, PollOutcome
+from ticket_poller.models import Baseline, Channel
 from ticket_poller.rules import compute_baseline
 from ticket_poller.schedule import canary_due, next_canary_at, outage_deadline
 from ticket_poller.state import PollRecord, RuntimeState
@@ -80,7 +80,7 @@ def render_status(store: Store, settings: Settings, now: datetime) -> str:
 def _poll_line(poll: PollRecord, tz: tzinfo) -> str:
     elapsed = "" if poll.elapsed_s is None else f"{poll.elapsed_s:.1f}s"
     head = f"{local_time(poll.started_at, tz)}  {poll.outcome.value:<7} {elapsed:>6}"
-    if poll.outcome not in (PollOutcome.OK, PollOutcome.PARTIAL):
+    if not poll.outcome.succeeded:
         return f"{head}  {poll.detail}"
     capture = poll.resale_capture.value if poll.resale_capture else "n/a"
     return (
