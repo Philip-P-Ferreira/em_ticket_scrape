@@ -188,9 +188,13 @@ the desktop's version (156.0.8078.79, a distro build like Arch's) passed at once
 fresh profile; it sends byte-for-byte the desktop's request headers (User-Agent,
 `sec-ch-ua` brands, `Accept-Language` and their order), which Chrome for Testing 159 didn't.
 `deploy/nas/fetch-chromium.sh [VERSION]` downloads the `chromium` and `chromium-common` .debs
-from bookworm-security (newest by default) plus the four libraries UGOS lacks (`apt-get
-download`, no root, dpkg untouched), extracts them into `.nas/chromium-<version>/` and
-points the `.nas/chromium` link at it; `deploy/nas/chromium.sh` (the `CHROMIUM_PATH`) starts
+from bookworm-security (newest by default) and verifies them through Debian's signed chain
+(`InRelease` checked with `gpgv` against the system's Debian archive keyring, then the
+SHA256 of `Packages.xz` and of each .deb), plus the four libraries UGOS lacks (`apt-get
+download`, which verifies them too; no root, dpkg untouched). It extracts them into
+`.nas/chromium-<version>/` (with a `SHA256SUMS` of the .debs used), checks that the build
+loads and starts, and only then points the `.nas/chromium` link at it; re-running it for a
+version that is already there re-checks that build before relinking. `deploy/nas/chromium.sh` (the `CHROMIUM_PATH`) starts
 it with those libraries and without Debian's launcher flags (Arch's launcher adds none).
 Keep its major version in step with the desktop's `chromium --version`: re-run
 `fetch-chromium.sh` when the desktop moves to a new major version, then restart the
