@@ -16,6 +16,7 @@ UNITS=("$XVFB_UNIT" "$UNIT" "$FAILURE_UNIT")
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd -P)
 NAS=$ROOT/.nas                               # in-project uv, Python, Chromium and Xvfb
 UNIT_DIR=${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user
+HOME_REAL=$(realpath -m -- "$HOME")          # path checks compare resolved paths only
 DEFAULT_ROOT='%h/repos/em_ticket_scrape'     # the path written in the templates
 
 die() { echo "error: $*" >&2; exit 1; }
@@ -99,20 +100,22 @@ mkdir -p -- "$UNIT_DIR"
 # umask: another uid could rename the project or unit dir away and plant code that runs as
 # us. Take group/other write off every dir below $HOME down to both. Not $HOME itself: on
 # UGOS a chmod of it also strips its UGOS ACL (system.ugacl_self), and SSH key login to the
-# NAS was refused right after that was done once (README: Running on the NAS).
+# NAS was refused right after that was done once (README: Running on the NAS). Paths are
+# resolved first (symlinks, //, trailing /), so $HOME can't slip through as another spelling.
 for path in "$ROOT" "$UNIT_DIR"; do
-    dir=$path
-    while [[ $dir == "$HOME"/* ]]; do
+    dir=$(realpath -m -- "$path")
+    while [[ $dir == "$HOME_REAL"/* ]]; do
         if [[ -O $dir ]]; then chmod go-w -- "$dir"; fi
         dir=${dir%/*}
     done
 done
-if ! "$ROOT/deploy/nas/check-perms.sh" "$HOME" "$ROOT" "$UNIT_DIR"; then
+if ! "$ROOT/deploy/nas/check-perms.sh" -v "$HOME_REAL" "$ROOT" "$UNIT_DIR"; then
     cat >&2 <<EOF
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-WARNING: the dirs above are writable by other users, who could replace the poller's code
-or units through them. This script fixes the dirs below \$HOME, not \$HOME itself: read
-the README (Running on the NAS) before changing \$HOME. Re-run after UGOS updates.
+WARNING: the dirs above are still writable by other users (or not owned by you), who
+could replace the poller's code or units through them. Fix them by hand (chmod go-w, as
+their owner) and re-run; re-check after UGOS updates. Leave \$HOME itself alone: read the
+README (Running on the NAS).
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 EOF
 fi
@@ -122,7 +125,7 @@ trap 'rm -rf -- "$staging"' EXIT
 staged=()
 for unit in "${UNITS[@]}"; do
     tmp=$staging/$unit
-    if [[ $ROOT == "$HOME/repos/em_ticket_scrape" ]]; then
+    if [[ $ROOT == "$HOME_REAL/repos/em_ticket_scrape" ]]; then
         cp -- "$(unit_source "$unit")" "$tmp"
     else
         sed "s|$DEFAULT_ROOT|$ROOT|g" "$(unit_source "$unit")" >"$tmp"

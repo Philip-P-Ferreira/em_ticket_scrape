@@ -6,14 +6,17 @@
 [Unit]
 Description=Ticketmaster poller (Noah Kahan, 2027-04-27), NAS
 Documentation=file://%h/repos/em_ticket_scrape/README.md
-# Headed Chromium draws on the Xvfb display. Wants=, not Requires=: with Requires= a failed
-# Xvfb start leaves this unit inactive (job result "dependency", no OnFailure=), and Xvfb's
-# later auto-restart only try-restarts it, which does nothing to an inactive unit. With
-# Wants= the poller starts anyway, counts the missing display as failed polls (retried with
-# backoff, admin alert) and recovers once Xvfb is up. PartOf= still stops/restarts it when
-# Xvfb is stopped/restarted, also after an Xvfb crash.
+# Headed Chromium draws on the Xvfb display. Wants= + After= only, so Xvfb's state never
+# stops or fails this unit:
+# - Requires= would leave it inactive after a failed Xvfb start (job result "dependency",
+#   no OnFailure=), and Xvfb's later auto-restart only try-restarts it: no effect.
+# - PartOf= would restart it on every failed Xvfb retry, so a long Xvfb outage runs it into
+#   StartLimitBurst and leaves it failed, which the later try-restart doesn't undo either.
+# Instead the poller rides out an Xvfb outage itself: with no display the browser launch
+# (or the running browser) fails, the poll is recorded as failed (backoff, admin alert),
+# the browser is closed and is relaunched by the next poll once Xvfb is back (reading
+# Xvfb's new auth cookie). Stopping Xvfb no longer stops the poller: stop both explicitly.
 Wants=ticket-poller-xvfb.service
-PartOf=ticket-poller-xvfb.service
 After=ticket-poller-xvfb.service
 StartLimitIntervalSec=1h
 StartLimitBurst=20
