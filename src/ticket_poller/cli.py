@@ -4,10 +4,11 @@ import argparse
 import fcntl
 import logging
 import os
+import signal
 import sys
 import threading
 from collections.abc import Callable, Iterator, Sequence
-from contextlib import contextmanager
+from contextlib import ExitStack, closing, contextmanager
 from datetime import UTC, datetime
 from enum import IntEnum
 from pathlib import Path
@@ -15,10 +16,10 @@ from typing import Final
 
 import httpx
 
-from ticket_poller import __version__, messages, notify
+from ticket_poller import __version__, fetcher, messages, notify, poller
 from ticket_poller.config import ConfigError, Settings, load_settings, secure_runtime
 from ticket_poller.logsetup import configure_logging
-from ticket_poller.models import Channel, NoticeKind
+from ticket_poller.models import Channel, NoticeKind, PollOutcome
 from ticket_poller.status import canary_report, render_status
 from ticket_poller.store import NoStateError, Store, StoreError
 
@@ -65,8 +66,60 @@ def _cmd_run(args: argparse.Namespace, settings: Settings) -> int:
     return _not_implemented("run", "T6")
 
 
+@contextmanager
+def _stop_on_signals(stop: threading.Event) -> Iterator[None]:
+    """Turn SIGINT/SIGTERM into ``stop`` so a fetch ends early and the browser closes cleanly."""
+    previous = {
+        signum: signal.signal(signum, lambda *_: stop.set())
+        for signum in (signal.SIGINT, signal.SIGTERM)
+    }
+    try:
+        yield
+    finally:
+        for signum, handler in previous.items():
+            signal.signal(signum, handler)
+
+
+def _open_store_if_any(settings: Settings) -> Store | None:
+    try:
+        return Store.open_readonly(settings.db_path)
+    except NoStateError:
+        return None
+
+
 def _cmd_poll_once(args: argparse.Namespace, settings: Settings) -> int:
-    return _not_implemented("poll-once", "T5")
+    """Dry run: one real fetch, evaluated against the read-only store; nothing is sent or saved."""
+    if args.notify:
+        return _not_implemented("poll-once --notify", "T6")
+    try:
+        store = _open_store_if_any(settings)
+    except StoreError as exc:
+        log.error("%s", exc)
+        return ExitCode.CRASH
+
+    stop = threading.Event()
+    with ExitStack() as stack:
+        if store is not None:
+            stack.enter_context(store)
+        stack.enter_context(_stop_on_signals(stop))
+        source = stack.enter_context(closing(fetcher.build_fetcher(settings, stop)))
+        preview = poller.preview_poll(settings, source, store, datetime.now(UTC))
+    if preview is None:
+        print("poll-once: stopped")
+        return ExitCode.OK
+
+    if args.save is not None:
+        try:
+            saved = fetcher.save_responses(
+                args.save, preview.fetch.responses, settings.secret_values()
+            )
+        except (ConfigError, OSError) as exc:
+            log.error("cannot save responses: %s", exc)
+            return ExitCode.CRASH
+        print(f"saved {len(saved)} responses to {args.save}")
+    print(poller.render_preview(preview, settings))
+    succeeded = preview.outcome in (PollOutcome.OK, PollOutcome.PARTIAL)
+    return ExitCode.OK if succeeded else ExitCode.CRASH
 
 
 def _send_to_admin(
