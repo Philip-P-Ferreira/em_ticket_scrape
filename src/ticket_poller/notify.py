@@ -20,7 +20,7 @@ from typing import Final, Protocol
 import httpx
 from pydantic import SecretStr
 
-from ticket_poller.config import Settings
+from ticket_poller.config import OpsPushConfig, Settings
 from ticket_poller.logsetup import redact
 from ticket_poller.messages import Email, Push
 from ticket_poller.models import Channel, NoticeKind
@@ -464,6 +464,21 @@ def build_notifier(
     return Notifier(
         email, alert_push, ops_push, stop=stop, secrets=settings.secret_values(), audit=audit
     )
+
+
+class _NoEmailSender:
+    def send(self, email: Email, *, to: Sequence[str]) -> None:
+        raise RuntimeError("this notifier has no email channel")
+
+
+def build_ops_push_notifier(
+    config: OpsPushConfig, client: httpx.Client, *, stop: threading.Event
+) -> Notifier:
+    """A push-only ``Notifier`` to the ops topic that needs no validated ``Settings``."""
+    if config.topic is None:
+        raise ValueError("no ntfy topic configured")
+    push = NtfyPushSender(config.server, config.topic, config.token, client)
+    return Notifier(_NoEmailSender(), push, push, stop=stop, secrets=config.secret_values())
 
 
 def build_pinger(

@@ -411,7 +411,7 @@ def _degraded_reasons(report: CanaryReport, ctx: MessageContext) -> list[str]:
             reasons.append(f"failing for {format_duration(failing_for)}")
     if report.resale_missing_polls:
         reasons.append("resale not captured")
-    if report.parse_warning_polls:
+    if report.parse_degraded_polls:  # warnings alone stay on the informational Parser: line
         reasons.append(_parse_text(report))
     return reasons
 
@@ -646,11 +646,16 @@ def email_failing(*, failures: int, auth_rejected: bool) -> Push:
     return Push("ticket-poller: email delivery failing", message, 4, ("warning",))
 
 
-def service_failed(*, unit: str | None = None) -> Push:
-    """Ops push from ``notify-failure`` (systemd ``OnFailure=``); needs no state database."""
+def service_failed(*, unit: str | None = None, config_problem: str | None = None) -> Push:
+    """Ops push from ``notify-failure`` (systemd ``OnFailure=``); needs no state database.
+
+    ``config_problem`` is a short, secret-free reason the service refuses to start.
+    """
     title = "Ticket poller service FAILED — check journalctl --user -u ticket-poller"
-    message = f"systemd unit {unit} entered the failed state." if unit else title
-    return Push(title, message, 5, ("rotating_light",))
+    lines = [f"systemd unit {unit} entered the failed state." if unit else title]
+    if config_problem:
+        lines.append(f"Config problem: {config_problem}.")
+    return Push(title, "\n".join(lines), 5, ("rotating_light",))
 
 
 def sample_matches(rules: RuleConfig) -> list[Match]:

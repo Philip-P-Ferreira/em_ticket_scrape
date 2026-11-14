@@ -369,6 +369,18 @@ class TestCanary:
             "Parser: parse warnings in 2 polls (1 degraded) — see journalctl -p warning"
         )
 
+    def test_parse_warnings_without_degraded_polls_are_informational(self) -> None:
+        report = CanaryReport(
+            now=NOW, outcomes={PollOutcome.OK: 6}, parse_warning_polls=2, parse_degraded_polls=0
+        )
+
+        email = canary(report, CTX)
+
+        assert email.subject.endswith("— OK")
+        assert email.body.splitlines()[-1] == (
+            "Parser: parse warnings in 2 polls — see journalctl -p warning"
+        )
+
     def test_partial_polls_without_missing_resale_are_not_resale_degraded(self) -> None:
         report = CanaryReport(now=NOW, outcomes={PollOutcome.PARTIAL: 2})
 

@@ -13,6 +13,7 @@ import logging
 import os
 import re
 import stat
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import ROUND_HALF_UP, Decimal
@@ -42,6 +43,8 @@ log = logging.getLogger(__name__)
 
 ENV_FILE_VAR: Final = "ENV_FILE"
 DEFAULT_ENV_FILE: Final = Path(".env")
+DEFAULT_NTFY_SERVER: Final = "https://ntfy.sh"
+OPS_PUSH_KEYS: Final = ("NTFY_SERVER", "NTFY_TOPIC", "NTFY_OPS_TOPIC", "NTFY_TOKEN")
 MIN_SECRET_LENGTH: Final = 6
 PRIVATE_DIR_MODE: Final = 0o700
 PRIVATE_UMASK: Final = 0o077
@@ -149,7 +152,7 @@ class Settings(BaseSettings):
     admin_email: Text = "philip@ferreira-family.com"
 
     # Push and monitoring
-    ntfy_server: Text = "https://ntfy.sh"
+    ntfy_server: Text = DEFAULT_NTFY_SERVER
     ntfy_topic: SecretStr
     ntfy_ops_topic: SecretStr | None = None
     ntfy_token: SecretStr | None = None
@@ -392,6 +395,68 @@ def load_settings(env_file: Path | None = None) -> Settings:
         raise ConfigError(_format_validation_error(exc)) from None
     except OSError as exc:
         raise ConfigError(f"cannot read env file {path}: {exc.strerror}") from exc
+
+
+def env_file_path() -> Path:
+    """The env file ``load_settings()`` reads by default: ``$ENV_FILE``, else ``./.env``."""
+    explicit = os.environ.get(ENV_FILE_VAR)
+    return Path(explicit).expanduser() if explicit else DEFAULT_ENV_FILE
+
+
+@dataclass(frozen=True)
+class OpsPushConfig:
+    """Just enough to push to the ops topic, read without validating anything else."""
+
+    server: str
+    topic: SecretStr | None
+    """``NTFY_OPS_TOPIC``, else ``NTFY_TOPIC``; None when neither is set."""
+    token: SecretStr | None
+
+    def secret_values(self) -> tuple[str, ...]:
+        return tuple(s.get_secret_value() for s in (self.topic, self.token) if s is not None)
+
+
+def read_ops_push_config(path: Path) -> OpsPushConfig:
+    """Best effort, for ``notify-failure``: the ntfy settings from the environment, else from
+    ``path`` (minimal ``KEY=VALUE`` parsing, quotes stripped). Never raises: an unreadable
+    file, unsafe permissions or invalid other settings are ignored here."""
+    values = _read_env_file(path, OPS_PUSH_KEYS)
+    environ = {key.upper(): value.strip() for key, value in os.environ.items()}
+    values |= {key: environ[key] for key in OPS_PUSH_KEYS if environ.get(key)}
+
+    def secret(key: str) -> SecretStr | None:
+        return SecretStr(values[key]) if values.get(key) else None
+
+    return OpsPushConfig(
+        server=values.get("NTFY_SERVER") or DEFAULT_NTFY_SERVER,
+        topic=secret("NTFY_OPS_TOPIC") or secret("NTFY_TOPIC"),
+        token=secret("NTFY_TOKEN"),
+    )
+
+
+def _read_env_file(path: Path, keys: Iterable[str]) -> dict[str, str]:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return {}
+    wanted = set(keys)
+    values = {}
+    for raw in text.splitlines():
+        line = raw.strip().removeprefix("export ").lstrip()
+        key, sep, value = line.partition("=")
+        key = key.strip().upper()
+        if sep and key in wanted:
+            values[key] = _unquote(value.strip())
+    return values
+
+
+def _unquote(value: str) -> str:
+    """``"a b"`` → ``a b``; an unquoted value ends at an inline `` #`` comment."""
+    if value[:1] in ("'", '"'):
+        end = value.find(value[0], 1)
+        if end > 0:
+            return value[1:end]
+    return value.split(" #", 1)[0].strip()
 
 
 def ensure_private_dir(path: Path) -> None:

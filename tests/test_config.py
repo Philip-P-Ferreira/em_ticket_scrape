@@ -29,7 +29,9 @@ from ticket_poller.config import (
     check_env_file,
     dollars_to_cents,
     ensure_private_dir,
+    env_file_path,
     load_settings,
+    read_ops_push_config,
     secure_runtime,
 )
 
@@ -424,3 +426,52 @@ def test_env_example_is_valid(tmp_path: Path) -> None:
 
     assert settings.ntfy_topic.get_secret_value().startswith("change-me")
     assert settings.healthchecks_ping_url is None
+
+
+class TestReadOpsPushConfig:
+    def test_reads_only_ntfy_fields_and_strips_quotes(self, tmp_path: Path) -> None:
+        env = tmp_path / "ops.env"
+        env.write_text(
+            "# a comment\n"
+            'SENDER_APP_PASSWORD="not read"\n'
+            "export NTFY_SERVER='https://ntfy.example.com'\n"
+            f'NTFY_OPS_TOPIC="{NTFY_OPS_TOPIC}"  # ops\n'
+            f"NTFY_TOKEN = {NTFY_TOKEN} # token\n"
+            "WANTED_QUANTITIES=1\n",
+            encoding="utf-8",
+        )
+        env.chmod(0o644)
+
+        config = read_ops_push_config(env)
+
+        assert config.server == "https://ntfy.example.com"
+        assert config.topic is not None
+        assert config.topic.get_secret_value() == NTFY_OPS_TOPIC
+        assert config.token is not None
+        assert config.token.get_secret_value() == NTFY_TOKEN
+        assert config.secret_values() == (NTFY_OPS_TOPIC, NTFY_TOKEN)
+
+    def test_ops_topic_falls_back_and_environment_wins(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        env = tmp_path / "ops.env"
+        env.write_text("NTFY_TOPIC=from-file\nNTFY_OPS_TOPIC=\n", encoding="utf-8")
+        monkeypatch.setenv("NTFY_TOPIC", NTFY_TOPIC)
+
+        config = read_ops_push_config(env)
+
+        assert config.topic is not None
+        assert config.topic.get_secret_value() == NTFY_TOPIC
+        assert (config.server, config.token) == ("https://ntfy.sh", None)
+
+    def test_missing_or_unreadable_file_is_tolerated(self, tmp_path: Path) -> None:
+        config = read_ops_push_config(tmp_path / "missing.env")
+
+        assert (config.topic, config.token) == (None, None)
+
+    def test_env_file_path_follows_env_file(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        assert env_file_path() == Path(".env")
+        monkeypatch.setenv("ENV_FILE", str(tmp_path / "x.env"))
+        assert env_file_path() == tmp_path / "x.env"

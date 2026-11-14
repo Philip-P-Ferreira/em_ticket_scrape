@@ -17,7 +17,15 @@ from typing import Final
 import httpx
 
 from ticket_poller import __version__, dumps, fetcher, messages, notify, poller
-from ticket_poller.config import ConfigError, Settings, load_settings, secure_runtime
+from ticket_poller.config import (
+    ConfigError,
+    Settings,
+    check_env_file,
+    env_file_path,
+    load_settings,
+    read_ops_push_config,
+    secure_runtime,
+)
 from ticket_poller.logsetup import configure_logging
 from ticket_poller.models import Channel, NoticeKind
 from ticket_poller.report import render_report
@@ -171,10 +179,14 @@ def _send_to_admin(
     with httpx.Client() as client:
         notifier = notify.build_notifier(settings, client, stop=threading.Event())
         delivery = notifier.send(kind, email=email, push=push, to=[settings.admin_email])
+    _print_delivery(delivery)
+    return delivery
+
+
+def _print_delivery(delivery: notify.Delivery) -> None:
     for channel in Channel:
         result = delivery.result(channel)
         print(f"{channel.value}: {'skipped' if result is None else 'ok' if result else 'FAILED'}")
-    return delivery
 
 
 def _cmd_test_notify(args: argparse.Namespace, settings: Settings) -> int:
@@ -188,11 +200,37 @@ def _cmd_test_notify(args: argparse.Namespace, settings: Settings) -> int:
     return ExitCode.CRASH if delivery.any_failed else ExitCode.OK
 
 
-def _cmd_notify_failure(args: argparse.Namespace, settings: Settings) -> int:
-    """Ops push only, for systemd ``OnFailure=``: needs no state database and no email."""
-    push = messages.service_failed(unit=args.unit)
-    delivery = _send_to_admin(settings, NoticeKind.SERVICE_FAILED, None, push)
+def _cmd_notify_failure(args: argparse.Namespace) -> int:
+    """Ops push only, for systemd ``OnFailure=``. Best effort and tolerant: it reads just the
+    ntfy settings (no full validation, no permission refusal, no state database, no email), so
+    it still reports a service that exited 78 on bad config or an unsafe ``.env``."""
+    path = env_file_path()
+    config = read_ops_push_config(path)
+    configure_logging(logging.INFO, config.secret_values())
+    if config.topic is None:
+        log.error("cannot push: neither NTFY_OPS_TOPIC nor NTFY_TOPIC is set")
+        return ExitCode.CRASH
+    push = messages.service_failed(unit=args.unit, config_problem=_config_problem(path))
+    with httpx.Client() as client:
+        notifier = notify.build_ops_push_notifier(config, client, stop=threading.Event())
+        delivery = notifier.send(NoticeKind.SERVICE_FAILED, push=push, to=())
+    _print_delivery(delivery)
     return ExitCode.OK if delivery.ok(Channel.PUSH) else ExitCode.CRASH
+
+
+def _config_problem(path: Path) -> str | None:
+    """Why ``run`` would refuse to start (exit 78), in words safe to push; None if nothing."""
+    try:
+        check_env_file(path)
+    except (ConfigError, OSError) as exc:
+        log.warning("%s", exc)
+        return f"{path.name} permissions are unsafe (chmod 600 {path.name})"
+    try:
+        load_settings()
+    except ConfigError as exc:
+        log.warning("%s", exc)
+        return "the configuration is invalid"
+    return None
 
 
 def _cmd_canary_now(args: argparse.Namespace, settings: Settings) -> int:
@@ -272,12 +310,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     canary_now.add_argument("--print", action="store_true", help="print instead of sending")
 
-    notify_failure = add(
-        "notify-failure",
-        _cmd_notify_failure,
-        "push 'service FAILED' to the ops topic (run by ticket-poller-failure.service)",
-        lock=False,
+    # Dispatched before settings load (see main), so it has no Handler.
+    failure_help = "push 'service FAILED' to the ops topic (run by ticket-poller-failure.service)"
+    notify_failure = commands.add_parser(
+        "notify-failure", help=failure_help, description=failure_help
     )
+    notify_failure.set_defaults(handler=None, needs_lock=False)
     notify_failure.add_argument("unit", nargs="?", help="the failed systemd unit, for the text")
 
     add("status", _cmd_status, "show polling, outage, baseline and delivery state", lock=False)
@@ -287,6 +325,8 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     configure_logging()  # bootstrap; no secret is known (or logged) before settings load
+    if args.command == "notify-failure":
+        return _cmd_notify_failure(args)
     try:
         settings = load_settings()
         configure_logging(settings.log_level, settings.secret_values())

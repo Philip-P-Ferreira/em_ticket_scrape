@@ -58,8 +58,10 @@ deploy/install.sh --uninstall              # disable, stop and remove the units 
 - `ticket-poller.service`, the poller (below).
 - `ticket-poller-failure.service`, a oneshot that runs `ticket-poller notify-failure
   ticket-poller.service`, pushing "Ticket poller service FAILED — check journalctl --user
-  -u ticket-poller" to the ops topic (`NTFY_OPS_TOPIC`, else `NTFY_TOPIC`). It needs only
-  `.env`, not the state database or email. The poller starts it via `OnFailure=` when it
+  -u ticket-poller" to the ops topic (`NTFY_OPS_TOPIC`, else `NTFY_TOPIC`). It is best
+  effort: it reads only the ntfy settings from the environment and `.env`, without
+  validating the rest, and needs no state database or email, so it still pushes after an
+  exit 78 for invalid config or `.env` permissions (and says so, without any secret). The poller starts it via `OnFailure=` when it
   ends up failed (exit 78, or too many restarts); `RestartMode=direct` keeps ordinary
   auto-restarts from triggering it. Never enable it yourself.
 
@@ -127,8 +129,9 @@ Never delete the profile's `Singleton*` files.
   corrupt or unreadable: move it aside (alert history and the price baseline restart).
 - **"email delivery failing" push**: check `SENDER_APP_PASSWORD` (Gmail revokes App
   Passwords when the account password changes), then `uv run ticket-poller test-notify`.
-- **"canary DEGRADED … parse warnings"**: Ticketmaster's JSON changed shape; the
-  `parse warning` lines in the journal say which part.
+- **"canary DEGRADED … parse warnings (N degraded)"**: Ticketmaster's JSON changed shape
+  enough to lose data; the `parse warning` lines in the journal say which part. Warnings
+  without degraded polls only show on the canary's `Parser:` line.
 - **exit 75 / "another poller is running"**: stop the service before `poll-once`.
 - **ntfy push on iOS only shows after opening the app**: subscribe on the default
   `ntfy.sh` server (not a custom server URL); if it still only updates on refresh,

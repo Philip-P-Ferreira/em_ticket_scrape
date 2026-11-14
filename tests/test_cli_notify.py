@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+import httpx
 import pytest
 
 from tests.sample_env import APP_PASSWORD, NTFY_OPS_TOPIC, NTFY_TOKEN, NTFY_TOPIC, EnvFileFactory
@@ -49,6 +50,7 @@ def fake_notifier(monkeypatch: pytest.MonkeyPatch) -> FakeNotifier:
         return fake
 
     monkeypatch.setattr(notify, "build_notifier", build)
+    monkeypatch.setattr(notify, "build_ops_push_notifier", build)
     return fake
 
 
@@ -210,3 +212,70 @@ class TestNotifyFailure:
         ((_kind, _email, push, _to),) = fake_notifier.sent
         assert push is not None
         assert push.message == push.title
+
+    def test_unsafe_env_permissions_still_push_and_say_so(
+        self, make_env_file: EnvFileFactory, fake_notifier: FakeNotifier
+    ) -> None:
+        make_env_file(mode=0o644)
+
+        assert main(["notify-failure", "ticket-poller.service"]) == 0
+
+        ((_kind, _email, push, _to),) = fake_notifier.sent
+        assert push is not None
+        assert push.message.splitlines() == [
+            "systemd unit ticket-poller.service entered the failed state.",
+            "Config problem: .env permissions are unsafe (chmod 600 .env).",
+        ]
+
+    def test_invalid_config_still_pushes_and_says_so(
+        self, make_env_file: EnvFileFactory, fake_notifier: FakeNotifier
+    ) -> None:
+        make_env_file(SENDER_APP_PASSWORD=None, WANTED_QUANTITIES="1")
+
+        assert main(["notify-failure"]) == 0
+
+        ((_kind, _email, push, _to),) = fake_notifier.sent
+        assert push is not None
+        assert push.message.splitlines()[-1] == "Config problem: the configuration is invalid."
+        for secret in (APP_PASSWORD, NTFY_TOPIC, NTFY_OPS_TOPIC, NTFY_TOKEN):
+            assert secret not in push.title + push.message
+
+    def test_no_topic_exits_1_without_sending(
+        self, make_env_file: EnvFileFactory, fake_notifier: FakeNotifier
+    ) -> None:
+        make_env_file(NTFY_TOPIC=None, NTFY_OPS_TOPIC=None)
+
+        assert main(["notify-failure"]) == 1
+        assert fake_notifier.sent == []
+
+    @pytest.mark.parametrize(("status", "code"), [(200, 0), (403, 1)])
+    def test_real_push_goes_to_the_ops_topic_and_logs_no_secret(
+        self,
+        make_env_file: EnvFileFactory,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        status: int,
+        code: int,
+    ) -> None:
+        make_env_file(mode=0o640, NTFY_SERVER="https://ntfy.example.com", SENDER_EMAIL=None)
+        requests: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            return httpx.Response(status, request=request)
+
+        real_client = httpx.Client
+        monkeypatch.setattr(
+            httpx, "Client", lambda: real_client(transport=httpx.MockTransport(handler))
+        )
+
+        assert main(["notify-failure"]) == code
+
+        (request,) = requests
+        assert str(request.url) == "https://ntfy.example.com/"
+        assert request.headers["Authorization"] == f"Bearer {NTFY_TOKEN}"
+        assert NTFY_OPS_TOPIC.encode() in request.content
+        out, err = capsys.readouterr()
+        assert out.splitlines()[-1] == ("push: ok" if status == 200 else "push: FAILED")
+        for secret in (APP_PASSWORD, NTFY_TOPIC, NTFY_OPS_TOPIC, NTFY_TOKEN):
+            assert secret not in out + err
