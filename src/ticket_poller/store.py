@@ -14,10 +14,11 @@ lexicographically. Write methods are atomic on their own and join an enclosing
 
 import json
 import sqlite3
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass, fields, replace
+from dataclasses import dataclass, field, fields, replace
 from datetime import UTC, date, datetime, timedelta
+from functools import partial
 from pathlib import Path
 from types import TracebackType
 from typing import Any, Final, NamedTuple, Self
@@ -57,8 +58,13 @@ MIGRATIONS: tuple[tuple[str, ...], ...] = (
             cheapest_primary_qty3_cents INTEGER,
             cheapest_resale_qty2_cents INTEGER,
             cheapest_resale_qty3_cents INTEGER,
+            cheapest_primary_qty2_label TEXT,
+            cheapest_primary_qty3_label TEXT,
+            cheapest_resale_qty2_label TEXT,
+            cheapest_resale_qty3_label TEXT,
             matches INTEGER,
-            new_matches INTEGER)""",
+            new_matches INTEGER,
+            browser_recycled INTEGER NOT NULL DEFAULT 0)""",
         "CREATE INDEX polls_started_at ON polls (started_at)",
         """CREATE TABLE listings (
             dedup_key TEXT PRIMARY KEY,
@@ -152,6 +158,11 @@ class PollRecord:
     snapshot: PriceSnapshot | None = None
     matches: int | None = None
     new_matches: int | None = None
+    primary_labels: Mapping[int, str] = field(default_factory=dict)
+    """Per quantity, "section/row" of the cheapest primary listing in ``snapshot``."""
+    resale_labels: Mapping[int, str] = field(default_factory=dict)
+    browser_recycled: bool = False
+    """The browser was restarted during this poll."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -167,6 +178,9 @@ class PollStats:
     cheapest_primary: Mapping[int, int | None]
     """Per quantity, from the latest successful poll in the window."""
     cheapest_resale: Mapping[int, int | None]
+    cheapest_primary_label: Mapping[int, str | None]
+    """Per quantity, the label of the listing behind ``cheapest_primary``."""
+    cheapest_resale_label: Mapping[int, str | None]
     low_primary: Mapping[int, int | None]
     """Per quantity, the lowest cheapest price over the window."""
     low_resale: Mapping[int, int | None]
@@ -175,6 +189,8 @@ class PollStats:
     top_alerts: int
     channel_failures: Mapping[Channel, int]
     """Failed alert sends per channel in the window."""
+    browser_recycles: int
+    """Polls in the window during which the browser was restarted."""
 
     @property
     def total(self) -> int:
@@ -288,30 +304,15 @@ class Store:
     @classmethod
     def open_writer(cls, path: Path) -> Self:
         """Open read-write and migrate. Call only while holding the instance lock."""
-        conn = sqlite3.connect(path, autocommit=True)
-        try:
-            conn.execute(f"PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}")
-            conn.execute("PRAGMA journal_mode = WAL")
-            conn.execute("PRAGMA foreign_keys = ON")
-            _migrate(conn)
-        except BaseException:
-            conn.close()
-            raise
-        return cls(conn)
+        return cls(_connect(path, path, _prepare_writer))
 
     @classmethod
     def open_readonly(cls, path: Path) -> Self:
         """Open with ``mode=ro``; never migrates. Raises ``NoStateError``/``SchemaVersionError``."""
         if not path.exists():
             raise NoStateError(f"no state yet: {path} does not exist")
-        conn = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True, autocommit=True)
-        try:
-            conn.execute(f"PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}")
-            _check_readable_version(conn, path)
-        except BaseException:
-            conn.close()
-            raise
-        return cls(conn)
+        target = f"{path.resolve().as_uri()}?mode=ro"
+        return cls(_connect(path, target, partial(_prepare_reader, path=path), uri=True))
 
     def close(self) -> None:
         self._conn.close()
@@ -350,7 +351,11 @@ class Store:
 
         A listing adopts the row with its exact identity, else the most recently seen
         primary row with the same offer and overlapping places. Each row is adopted by at
-        most one listing per poll. ``rearm_after`` of zero disables re-arming.
+        most one listing per poll.
+
+        A row is re-armed once it has been gone for ``rearm_after``: measured from the first
+        OK/PARTIAL poll after it was last seen, so BLOCKED/ERROR outages don't count as
+        absence. ``rearm_after`` of zero disables re-arming.
         """
         found: dict[str, _StoredListing] = {}
         for listing in listings:
@@ -366,15 +371,19 @@ class Store:
                 found[listing.identity] = row
                 claimed.add(row.key)
 
-        cutoff = now - rearm_after if rearm_after else None
         return [
-            _resolved(listing.identity, found.get(listing.identity), cutoff) for listing in listings
+            self._resolved(listing.identity, found.get(listing.identity), now, rearm_after)
+            for listing in listings
         ]
 
     def observe(
         self, resolved: Sequence[Resolved], listings: Sequence[Listing], now: datetime
     ) -> None:
-        """Upsert every current candidate; re-armed rows lose their deliveries."""
+        """Upsert every current candidate; re-armed rows lose their deliveries.
+
+        ``now`` must not be earlier than this poll's ``started_at``, or the poll would
+        later count as one the listings were missing from.
+        """
         with self.transaction():
             for res, listing in zip(resolved, listings, strict=True):
                 if res.identity != listing.identity:
@@ -385,12 +394,19 @@ class Store:
                         "DELETE FROM alert_deliveries WHERE dedup_key = ?", (res.key,)
                     )
 
-    def pending(self, matches: Iterable[KeyedMatch], channel: Channel) -> list[KeyedMatch]:
-        """Matches not yet delivered on ``channel``, or now at a better priority (upgrade)."""
+    def pending(
+        self, matches: Iterable[KeyedMatch], channel: Channel, resolved: Iterable[Resolved] = ()
+    ) -> list[KeyedMatch]:
+        """Matches not yet delivered on ``channel``, or now at a better priority (upgrade).
+
+        Keys re-armed in ``resolved`` are pending even before ``observe`` resets their
+        deliveries, so a dry run labels them correctly.
+        """
+        rearmed = {res.key for res in resolved if res.rearmed}
         return [
             (key, match)
             for key, match in matches
-            if self._needs_delivery(key, match.priority, channel)
+            if key in rearmed or self._needs_delivery(key, match.priority, channel)
         ]
 
     def mark_delivered(
@@ -405,6 +421,23 @@ class Store:
                      priority = MIN(priority, excluded.priority)""",
                 [(key, channel.value, _ts(now), match.priority.value) for key, match in matches],
             )
+
+    def _resolved(
+        self, identity: str, row: _StoredListing | None, now: datetime, rearm_after: timedelta
+    ) -> Resolved:
+        if row is None:
+            return Resolved(identity=identity, key=identity, rearmed=False)
+        gone_at = self._gone_at(row) if rearm_after else None
+        rearmed = gone_at is not None and gone_at <= now - rearm_after
+        return Resolved(identity=identity, key=row.key, rearmed=rearmed)
+
+    def _gone_at(self, row: _StoredListing) -> datetime | None:
+        """The first successful poll after ``row`` was last seen, i.e. one without it."""
+        found = self._conn.execute(
+            "SELECT MIN(started_at) FROM polls WHERE outcome IN (?, ?) AND started_at > ?",
+            (*_SUCCESS, _ts(row.last_seen_at)),
+        ).fetchone()
+        return _optional_ts(found[0])
 
     def _listing_by_key(self, key: str) -> _StoredListing | None:
         row = self._conn.execute(
@@ -466,7 +499,10 @@ class Store:
             "resale_listings": record.resale_listings,
             "matches": record.matches,
             "new_matches": record.new_matches,
+            "browser_recycled": record.browser_recycled,
             **_snapshot_columns(record.snapshot),
+            **_label_columns(InventoryType.PRIMARY, record.primary_labels),
+            **_label_columns(InventoryType.RESALE, record.resale_labels),
         }
         columns = ", ".join(values)
         placeholders = ", ".join(f":{name}" for name in values)
@@ -497,6 +533,7 @@ class Store:
 
     def stats_since(self, since: datetime) -> PollStats:
         start = _ts(since)
+        latest = self._latest_success(start)
         return PollStats(
             since=since,
             outcomes=self._outcome_counts(start),
@@ -506,8 +543,10 @@ class Store:
                    WHERE started_at >= ? AND outcome IN (?, ?) AND resale_capture = ?""",
                 (start, *_SUCCESS, ResaleCapture.CAPTURED.value),
             ),
-            cheapest_primary=self._latest_cheapest(InventoryType.PRIMARY, start),
-            cheapest_resale=self._latest_cheapest(InventoryType.RESALE, start),
+            cheapest_primary=_by_qty(latest, _price_column, InventoryType.PRIMARY),
+            cheapest_resale=_by_qty(latest, _price_column, InventoryType.RESALE),
+            cheapest_primary_label=_by_qty(latest, _label_column, InventoryType.PRIMARY),
+            cheapest_resale_label=_by_qty(latest, _label_column, InventoryType.RESALE),
             low_primary=self._lowest_cheapest(InventoryType.PRIMARY, start),
             low_resale=self._lowest_cheapest(InventoryType.RESALE, start),
             alerts=self._scalar(
@@ -520,6 +559,9 @@ class Store:
                 (start, Priority.TOP.value),
             ),
             channel_failures=self._alert_failures(start),
+            browser_recycles=self._scalar(
+                "SELECT COUNT(*) FROM polls WHERE started_at >= ? AND browser_recycled", (start,)
+            ),
         )
 
     def _outcome_counts(self, start: str) -> dict[PollOutcome, int]:
@@ -537,16 +579,13 @@ class Store:
         ).fetchone()
         return _optional_ts(row[0])
 
-    def _latest_cheapest(self, kind: InventoryType, start: str) -> dict[int, int | None]:
-        columns = ", ".join(_price_column(kind, qty) for qty in SNAPSHOT_QUANTITIES)
-        row = self._conn.execute(
-            f"""SELECT {columns} FROM polls
-                WHERE started_at >= ? AND outcome IN (?, ?)
-                ORDER BY started_at DESC, id DESC LIMIT 1""",
+    def _latest_success(self, start: str) -> sqlite3.Row | None:
+        row: sqlite3.Row | None = self._conn.execute(
+            """SELECT * FROM polls WHERE started_at >= ? AND outcome IN (?, ?)
+               ORDER BY started_at DESC, id DESC LIMIT 1""",
             (start, *_SUCCESS),
         ).fetchone()
-        values = row or (None,) * len(SNAPSHOT_QUANTITIES)
-        return dict(zip(SNAPSHOT_QUANTITIES, values, strict=True))
+        return row
 
     def _lowest_cheapest(self, kind: InventoryType, start: str) -> dict[int, int | None]:
         columns = ", ".join(f"MIN({_price_column(kind, qty)})" for qty in SNAPSHOT_QUANTITIES)
@@ -624,6 +663,40 @@ def key_matches(matches: Iterable[Match], resolved: Iterable[Resolved]) -> list[
 # --- helpers -----------------------------------------------------------------------------------
 
 
+def _connect(
+    path: Path,
+    target: str | Path,
+    prepare: Callable[[sqlite3.Connection], None],
+    *,
+    uri: bool = False,
+) -> sqlite3.Connection:
+    """Connect and run ``prepare``; SQLite failures (e.g. a corrupt file) become StoreError."""
+    try:
+        conn = sqlite3.connect(target, uri=uri, autocommit=True)
+    except sqlite3.DatabaseError as exc:
+        raise StoreError(f"cannot open {path}: {exc}") from exc
+    try:
+        prepare(conn)
+    except BaseException as exc:
+        conn.close()
+        if isinstance(exc, sqlite3.DatabaseError):
+            raise StoreError(f"cannot open {path}: {exc}") from exc
+        raise
+    return conn
+
+
+def _prepare_writer(conn: sqlite3.Connection) -> None:
+    conn.execute(f"PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}")
+    conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA foreign_keys = ON")
+    _migrate(conn)
+
+
+def _prepare_reader(conn: sqlite3.Connection, path: Path) -> None:
+    conn.execute(f"PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}")
+    _check_readable_version(conn, path)
+
+
 def _migrate(conn: sqlite3.Connection) -> None:
     conn.execute("BEGIN IMMEDIATE")
     try:
@@ -659,13 +732,6 @@ def _user_version(conn: sqlite3.Connection) -> int:
     return version
 
 
-def _resolved(identity: str, row: _StoredListing | None, cutoff: datetime | None) -> Resolved:
-    if row is None:
-        return Resolved(identity=identity, key=identity, rearmed=False)
-    rearmed = cutoff is not None and row.last_seen_at < cutoff
-    return Resolved(identity=identity, key=row.key, rearmed=rearmed)
-
-
 def _stored_listing(row: sqlite3.Row) -> _StoredListing:
     key, places, last_seen_at = row
     return _StoredListing(key, frozenset(json.loads(places)), _from_ts(last_seen_at))
@@ -677,6 +743,14 @@ def _summary(listing: Listing) -> str:
 
 def _price_column(kind: InventoryType, qty: int) -> str:
     return f"cheapest_{kind.value}_qty{qty}_cents"
+
+
+def _label_column(kind: InventoryType, qty: int) -> str:
+    return f"cheapest_{kind.value}_qty{qty}_label"
+
+
+def _label_columns(kind: InventoryType, labels: Mapping[int, str]) -> dict[str, str | None]:
+    return {_label_column(kind, qty): labels.get(qty) for qty in SNAPSHOT_QUANTITIES}
 
 
 def _snapshot_columns(snapshot: PriceSnapshot | None) -> dict[str, int | None]:
@@ -695,8 +769,8 @@ def _poll_record(data: sqlite3.Row) -> PollRecord:
     if outcome.value in _SUCCESS:
         snapshot = PriceSnapshot(
             baseline_sample_cents=data["baseline_sample_cents"],
-            primary_by_qty=_by_qty(data, InventoryType.PRIMARY),
-            resale_by_qty=_by_qty(data, InventoryType.RESALE),
+            primary_by_qty=_by_qty(data, _price_column, InventoryType.PRIMARY),
+            resale_by_qty=_by_qty(data, _price_column, InventoryType.RESALE),
         )
     capture = data["resale_capture"]
     return PollRecord(
@@ -710,8 +784,19 @@ def _poll_record(data: sqlite3.Row) -> PollRecord:
         snapshot=snapshot,
         matches=data["matches"],
         new_matches=data["new_matches"],
+        primary_labels=_labels(data, InventoryType.PRIMARY),
+        resale_labels=_labels(data, InventoryType.RESALE),
+        browser_recycled=bool(data["browser_recycled"]),
     )
 
 
-def _by_qty(data: sqlite3.Row, kind: InventoryType) -> dict[int, int | None]:
-    return {qty: data[_price_column(kind, qty)] for qty in SNAPSHOT_QUANTITIES}
+def _by_qty(
+    data: sqlite3.Row | None, column: Callable[[InventoryType, int], str], kind: InventoryType
+) -> dict[int, Any]:
+    """Per-quantity values of ``column``; all None when there is no row."""
+    return {qty: None if data is None else data[column(kind, qty)] for qty in SNAPSHOT_QUANTITIES}
+
+
+def _labels(data: sqlite3.Row, kind: InventoryType) -> dict[int, str]:
+    labels = _by_qty(data, _label_column, kind)
+    return {qty: label for qty, label in labels.items() if label is not None}

@@ -113,6 +113,14 @@ class TestStatusCommand:
         assert settings.db_path.stat().st_mtime_ns == before
         assert len(store.recent_polls(10)) == 1
 
+    def test_corrupt_database_is_an_error(
+        self, settings: Settings, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        settings.db_path.write_bytes(b"this is not a sqlite database" * 100)
+
+        assert main(["status"]) == ExitCode.CRASH
+        assert "cannot open" in caplog.text
+
     def test_newer_schema_is_an_error(
         self, store: Store, settings: Settings, caplog: pytest.LogCaptureFixture
     ) -> None:

@@ -2,7 +2,7 @@ import contextlib
 import dataclasses
 import sqlite3
 import threading
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -33,6 +33,7 @@ from ticket_poller.store import (
     RuntimeState,
     SchemaVersionError,
     Store,
+    StoreError,
     key_matches,
     schema_version,
 )
@@ -226,6 +227,14 @@ class TestOpening:
             Store.open_readonly(db_path)
 
 
+@pytest.mark.parametrize("opener", [Store.open_writer, Store.open_readonly])
+def test_corrupt_file_is_a_store_error(db_path: Path, opener: Callable[[Path], Store]) -> None:
+    db_path.write_bytes(b"this is not a sqlite database" * 100)
+
+    with pytest.raises(StoreError, match=f"cannot open {db_path}"):
+        opener(db_path)
+
+
 class TestMigrations:
     V2 = ("ALTER TABLE polls ADD COLUMN extra INTEGER",)
 
@@ -253,7 +262,7 @@ class TestMigrations:
         broken = ("ALTER TABLE polls ADD COLUMN extra INTEGER", "NOT VALID SQL")
         monkeypatch.setattr(store_module, "MIGRATIONS", (*MIGRATIONS, broken))
 
-        with pytest.raises(sqlite3.OperationalError):
+        with pytest.raises(StoreError, match="cannot open"):
             Store.open_writer(db_path)
 
         assert raw_pragma(db_path, "user_version") == [(1,)]
@@ -444,10 +453,16 @@ class TestDeliveries:
         assert keys == []
 
 
+def poll(store: Store, when: datetime, outcome: PollOutcome = PollOutcome.OK) -> None:
+    """Record a poll that did not see any of the test listings."""
+    store.record_poll(PollRecord(started_at=when, outcome=outcome))
+
+
 class TestRearm:
-    def test_listing_back_after_24h_alerts_again(self, store: Store) -> None:
+    def test_listing_gone_for_24h_alerts_again(self, store: Store) -> None:
         listing = primary("A", "B")
         deliver(store, listing, T0, *Channel, priority=Priority.NORMAL)
+        poll(store, at(minutes=5))
 
         [res] = store.resolve([listing], at(hours=25), REARM)
         assert res.rearmed is True
@@ -455,24 +470,61 @@ class TestRearm:
         for channel in Channel:
             assert pending_keys(store, [match(listing)], channel, at(hours=25)) == [res.key]
 
+    def test_absence_counts_from_the_first_poll_without_it(self, store: Store) -> None:
+        listing = primary("A", "B")
+        deliver(store, listing, T0, *Channel, priority=Priority.NORMAL)
+        poll(store, at(minutes=5))
+
+        [early] = store.resolve([listing], at(hours=24), REARM)
+        [due] = store.resolve([listing], at(hours=24, minutes=5), REARM)
+
+        assert (early.rearmed, due.rearmed) == (False, True)
+
     def test_short_absence_does_not_rearm(self, store: Store) -> None:
         listing = primary("A", "B")
         deliver(store, listing, T0, *Channel, priority=Priority.NORMAL)
+        poll(store, at(minutes=5))
 
         [res] = store.resolve([listing], at(hours=2), REARM)
 
         assert res.rearmed is False
         assert pending_keys(store, [match(listing)], Channel.EMAIL, at(hours=2)) == []
 
+    def test_an_outage_is_not_absence(self, store: Store) -> None:
+        listing = primary("A", "B")
+        deliver(store, listing, T0, *Channel, priority=Priority.NORMAL)
+        for hour in range(31):
+            outcome = PollOutcome.BLOCKED if hour % 2 else PollOutcome.ERROR
+            poll(store, at(hours=hour, minutes=5), outcome)
+
+        [res] = store.resolve([listing], at(hours=31), REARM)
+
+        assert res.rearmed is False
+        assert pending_keys(store, [match(listing)], Channel.PUSH, at(hours=31)) == []
+
+    def test_absence_after_an_outage_counts_from_recovery(self, store: Store) -> None:
+        listing = primary("A", "B")
+        deliver(store, listing, T0, *Channel, priority=Priority.NORMAL)
+        poll(store, at(hours=1), PollOutcome.BLOCKED)
+        poll(store, at(hours=30))
+
+        [before] = store.resolve([listing], at(hours=40), REARM)
+        [after] = store.resolve([listing], at(hours=54), REARM)
+
+        assert (before.rearmed, after.rearmed) == (False, True)
+
     def test_continuous_presence_never_rearms(self, store: Store) -> None:
         listing = primary("A", "B")
         deliver(store, listing, T0, *Channel, priority=Priority.NORMAL)
-        see(store, [listing], at(hours=20))
+        for hour in range(0, 41, 5):
+            poll(store, at(hours=hour))
+            see(store, [listing], at(hours=hour))
 
-        assert pending_keys(store, [match(listing)], Channel.EMAIL, at(hours=40)) == []
+        assert pending_keys(store, [match(listing)], Channel.EMAIL, at(hours=45)) == []
 
     def test_rearm_follows_the_adopted_row(self, store: Store) -> None:
         deliver(store, primary("A", "B"), T0, Channel.EMAIL, priority=Priority.NORMAL)
+        poll(store, at(minutes=5))
 
         keys = pending_keys(store, [match(primary("B", "C"))], Channel.EMAIL, at(hours=30))
 
@@ -481,11 +533,23 @@ class TestRearm:
     def test_zero_disables_rearming(self, store: Store) -> None:
         listing = primary("A", "B")
         deliver(store, listing, T0, *Channel, priority=Priority.NORMAL)
+        poll(store, at(minutes=5))
 
         [res] = see(store, [listing], at(hours=100), rearm=timedelta(0))
 
         assert res.rearmed is False
         assert store.pending(key_matches([match(listing)], [res]), Channel.EMAIL) == []
+
+    def test_pending_honours_rearm_without_observe(self, store: Store) -> None:
+        listing = primary("A", "B")
+        deliver(store, listing, T0, *Channel, priority=Priority.NORMAL)
+        poll(store, at(minutes=5))
+
+        resolved = store.resolve([listing], at(hours=25), REARM)
+        keyed = key_matches([match(listing)], resolved)
+
+        assert store.pending(keyed, Channel.EMAIL) == []
+        assert store.pending(keyed, Channel.EMAIL, resolved) == keyed
 
 
 class TestPolls:
@@ -493,7 +557,9 @@ class TestPolls:
         good = ok_poll(
             T0,
             snapshot=snapshot(30000, {2: 30000, 3: 41000}, {2: None, 3: 38350}),
-            detail="",
+            primary_labels={2: "Sec 104 Row R", 3: "Sec 105 Row A"},
+            resale_labels={3: "Sec 101 Row N"},
+            browser_recycled=True,
         )
         failed = PollRecord(
             started_at=at(minutes=5), outcome=PollOutcome.BLOCKED, detail="HTTP 403"
@@ -541,14 +607,28 @@ class TestStats:
         assert set(stats.outcomes) == set(PollOutcome)
         assert stats.last_success_at is None
         assert stats.cheapest_primary == stats.low_resale == {2: None, 3: None}
+        assert stats.cheapest_primary_label == stats.cheapest_resale_label == {2: None, 3: None}
+        assert stats.browser_recycles == 0
         assert (stats.alerts, stats.top_alerts, stats.resale_captured) == (0, 0, 0)
         assert stats.channel_failures == {Channel.EMAIL: 0, Channel.PUSH: 0}
 
     def test_polls_and_prices(self, store: Store) -> None:
         since = T0
-        store.record_poll(ok_poll(since - DAY, snapshot=snapshot(1, {2: 1, 3: 1}, {2: 1, 3: 1})))
         store.record_poll(
-            ok_poll(at(hours=1), snapshot=snapshot(500, {2: 500, 3: None}, {2: 800, 3: None}))
+            ok_poll(
+                since - DAY,
+                snapshot=snapshot(1, {2: 1, 3: 1}, {2: 1, 3: 1}),
+                browser_recycled=True,
+            )
+        )
+        store.record_poll(
+            ok_poll(
+                at(hours=1),
+                snapshot=snapshot(500, {2: 500, 3: None}, {2: 800, 3: None}),
+                primary_labels={2: "Sec 101 Row A"},
+                resale_labels={2: "Sec 102 Row B"},
+                browser_recycled=True,
+            )
         )
         store.record_poll(
             ok_poll(
@@ -556,10 +636,13 @@ class TestStats:
                 outcome=PollOutcome.PARTIAL,
                 resale_capture=ResaleCapture.MISSING,
                 snapshot=snapshot(600, {2: 600, 3: 700}, {2: None, 3: None}),
+                primary_labels={2: "Sec 104 Row R", 3: "Sec 105 Row A"},
             )
         )
         for minutes, outcome in [(180, PollOutcome.BLOCKED), (190, PollOutcome.ERROR)]:
-            store.record_poll(PollRecord(started_at=at(minutes=minutes), outcome=outcome))
+            store.record_poll(
+                PollRecord(started_at=at(minutes=minutes), outcome=outcome, browser_recycled=True)
+            )
 
         stats = store.stats_since(since)
 
@@ -574,6 +657,9 @@ class TestStats:
         assert stats.resale_captured == 1
         assert stats.cheapest_primary == {2: 600, 3: 700}
         assert stats.cheapest_resale == {2: None, 3: None}
+        assert stats.cheapest_primary_label == {2: "Sec 104 Row R", 3: "Sec 105 Row A"}
+        assert stats.cheapest_resale_label == {2: None, 3: None}
+        assert stats.browser_recycles == 3
         assert stats.low_primary == {2: 500, 3: 700}
         assert stats.low_resale == {2: 800, 3: None}
 
