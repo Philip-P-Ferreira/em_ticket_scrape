@@ -6,6 +6,7 @@ This is a fully vibe-coded repo. I gave it a fairly descriptive prompt with desi
 It also is fairly configurable, with basically everything controlled through environment variables. I also learned about some new solutions like ntfy.sh and healthchecks.io for monitoring and alerting. SQLlite is also a neat technology I've never used before.
 
 Thus ends the human-written overview. Everything below this line is fully written by AI
+
 ---------------------
 
 Polls one Ticketmaster event page (Noah Kahan, Birmingham, 2027-04-27) in a headed Chromium
