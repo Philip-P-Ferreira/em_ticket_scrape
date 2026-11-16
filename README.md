@@ -131,8 +131,10 @@ poller closes the browser and renames the profile to
 `chromium-profile.flagged-<UTC YYYYmmddTHHMMSSZ>` in the same directory
 (`~/.local/share/em_ticket_scrape/` by default); the next poll, at the normal interval
 rather than the block backoff, starts from a fresh profile. It does this at most once per
-failure streak (remembered across restarts); if the fresh profile is blocked too, the normal
-block backoff applies. Each rotation logs `browser profile rotated after block: <old> ->
+failure streak (remembered across restarts); if the fresh profile is blocked too, the block
+backoff continues from the streak's count of consecutive blocks, so after a blocked poll
+that rotated the next wait is 30 min, then 60 min (a rotation after an ERROR-classified
+block page restarts it at 15 min). Each rotation logs `browser profile rotated after block: <old> ->
 <new>` and emails `ADMIN_EMAIL` (no push). Only the newest `BROWSER_PROFILE_KEEP_FLAGGED`
 (default 2) `chromium-profile.flagged-*` directories are kept, by modification time,
 including ones renamed by hand. `BROWSER_PROFILE_ROTATE_ON_BLOCK=false` turns this off.

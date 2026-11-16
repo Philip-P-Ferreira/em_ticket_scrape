@@ -42,6 +42,7 @@ from ticket_poller.poller import (
     audit_to,
 )
 from ticket_poller.report import render_report
+from ticket_poller.state import PollRecord
 from ticket_poller.store import Store
 from ticket_poller.watchdog import Watchdog
 
@@ -898,6 +899,32 @@ def test_the_rotation_limit_survives_a_restart(make_service: ServiceFactory) -> 
     assert svc.poll_times() == [minutes(0), minutes(5)]  # resumed at the interval
     assert svc.fetcher.rotations == [1]
     assert svc.store.get_state().profile_rotated_this_streak
+
+
+def test_a_rotation_survives_a_crash_while_recording_the_poll(
+    make_service: ServiceFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    svc = make_service(BLOCK_PAGE, BLOCK_PAGE)
+    record_poll = svc.store.record_poll
+    calls = 0
+
+    def record_poll_once_crashing(record: PollRecord) -> int:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("disk full")
+        return record_poll(record)
+
+    monkeypatch.setattr(svc.store, "record_poll", record_poll_once_crashing)
+
+    svc.run_for(minutes(6))
+
+    (latest, crashed) = svc.store.recent_polls(2)
+    assert (crashed.detail, crashed.profile_rotated) == ("crash: RuntimeError: disk full", True)
+    assert latest.started_at - crashed.started_at == minutes(5)  # the interval, not a backoff
+    assert svc.fetcher.rotations == [1]  # not again in the same streak
+    assert svc.store.get_state().profile_rotated_this_streak
+    assert [e.subject for e, _ in svc.email.sent] == [ROTATED]
 
 
 def test_a_failed_rotation_is_retried_on_the_next_block(make_service: ServiceFactory) -> None:

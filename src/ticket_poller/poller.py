@@ -380,14 +380,16 @@ class Poller:
         if dry_run:
             result = self._fetcher.fetch()
             return None if result is None else self._evaluate(started, result, dry_run=True)
+        rotated_to: Path | None = None
         try:
             result = self._fetcher.fetch()
             if result is None:
                 return None
             report = self._rotate_profile_if_blocked(self._evaluate(started, result, dry_run=False))
+            rotated_to = report.profile_rotated_to
             self._record(report)
         except Exception as exc:  # nothing was committed: record the crash as this poll
-            report = self._crash_report(started, exc)
+            report = replace(self._crash_report(started, exc), profile_rotated_to=rotated_to)
             self._record(report)
         if not report.succeeded:
             self._watchdog.busy("browser close")
