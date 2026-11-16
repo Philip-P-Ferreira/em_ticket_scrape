@@ -89,9 +89,20 @@ def failure_delay(outcome: PollOutcome, streak: int, timing: PollTiming) -> floa
             raise ValueError(f"{outcome} is not a failure")
 
 
-def poll_delay(outcome: PollOutcome, streak: int, timing: PollTiming, rng: random.Random) -> float:
-    """Jittered delay before the next poll: the interval after success, else the backoff."""
-    if outcome.succeeded:
+def poll_delay(
+    outcome: PollOutcome,
+    streak: int,
+    timing: PollTiming,
+    rng: random.Random,
+    *,
+    fresh_profile: bool = False,
+) -> float:
+    """Jittered delay before the next poll: the interval after success, else the backoff.
+
+    A failure that just rotated the browser profile retries at the interval too: the block
+    was against the old profile, so backing off would only delay the fresh one.
+    """
+    if outcome.succeeded or fresh_profile:
         return jittered(timing.interval_s, timing.jitter_s, rng)
     delay = failure_delay(outcome, streak, timing)
     return jittered(delay, delay * FAILURE_JITTER_FRACTION, rng)

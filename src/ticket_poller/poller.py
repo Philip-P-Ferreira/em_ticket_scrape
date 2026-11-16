@@ -13,6 +13,7 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from enum import StrEnum
+from pathlib import Path
 from typing import Final, Protocol
 
 from ticket_poller import messages
@@ -119,6 +120,8 @@ class PollReport:
     findings: Findings | None
     has_state: bool
     dry_run: bool
+    profile_rotated_to: Path | None = None
+    """Where the blocked browser profile was set aside during this poll."""
 
     @property
     def succeeded(self) -> bool:
@@ -199,7 +202,10 @@ class Poller:
         if state.consecutive_failures == 0 or not last or last[0].outcome.succeeded:
             return now
         outcome = last[0].outcome
-        delay = failure_delay(outcome, self._streak(state, outcome), self._timing)
+        if last[0].profile_rotated:
+            delay = self._timing.interval_s
+        else:
+            delay = failure_delay(outcome, self._streak(state, outcome), self._timing)
         resume = last[0].started_at + timedelta(seconds=delay)
         if resume > now:
             log.info("resuming the failure backoff: first poll at %s", resume.isoformat())
@@ -233,7 +239,8 @@ class Poller:
 
     def _schedule_after(self, report: PollReport) -> datetime:
         streak = self._streak(self._store.get_state(), report.outcome)
-        delay = poll_delay(report.outcome, streak, self._timing, self._rng)
+        fresh = report.profile_rotated_to is not None
+        delay = poll_delay(report.outcome, streak, self._timing, self._rng, fresh_profile=fresh)
         level = logging.INFO if report.succeeded else logging.WARNING
         log.log(level, "%s next=%s", poll_summary(report, self._ctx), _seconds_text(delay))
         return self._clock.now() + timedelta(seconds=delay)
@@ -377,7 +384,7 @@ class Poller:
             result = self._fetcher.fetch()
             if result is None:
                 return None
-            report = self._evaluate(started, result, dry_run=False)
+            report = self._rotate_profile_if_blocked(self._evaluate(started, result, dry_run=False))
             self._record(report)
         except Exception as exc:  # nothing was committed: record the crash as this poll
             report = self._crash_report(started, exc)
@@ -385,8 +392,40 @@ class Poller:
         if not report.succeeded:
             self._watchdog.busy("browser close")
             self._fetcher.close()  # relaunch the browser on the next poll (§9.1)
+            if report.profile_rotated_to is not None:
+                self._announce_profile_rotation(report, report.profile_rotated_to)
             return report
         return self._act_on(report)
+
+    def _rotate_profile_if_blocked(self, report: PollReport) -> PollReport:
+        """After the block page, set the profile aside, at most once per failure streak.
+
+        Ticketmaster flags a profile after hours of polling while a fresh one passes at once.
+        """
+        if (
+            report.succeeded
+            or not report.fetch.block_page
+            or not self._settings.browser_profile_rotate_on_block
+            or self._store.get_state().profile_rotated_this_streak
+        ):
+            return report
+        self._watchdog.busy("profile rotation")
+        self._fetcher.close()
+        flagged = self._fetcher.rotate_profile()
+        return report if flagged is None else replace(report, profile_rotated_to=flagged)
+
+    def _announce_profile_rotation(self, report: PollReport, flagged: Path) -> None:
+        """Admin email only; a failure never affects polling."""
+        self._watchdog.busy("profile rotation notice")
+        try:
+            notice = messages.profile_rotated(
+                detail=report.detail,
+                flagged=flagged,
+                keep=self._settings.browser_profile_keep_flagged,
+            )
+            self._notify_admin(notice)
+        except Exception:
+            log.exception("profile rotation notice failed")
 
     def _crash_report(self, started: datetime, exc: Exception) -> PollReport:
         log.exception("poll crashed")
@@ -470,6 +509,8 @@ class Poller:
                 state = state.record_success(now)
             else:
                 state = state.record_failure(report.outcome, now)
+                if report.profile_rotated_to is not None:
+                    state = state.record_profile_rotation()
             if findings is not None:
                 state = _track_resale(state, findings.capture, report.fetch.resale_eligible)
             store.save_state(state)
@@ -601,6 +642,7 @@ def _poll_record(report: PollReport, wanted: frozenset[int]) -> PollRecord:
         detail=report.detail,
         elapsed_s=fetch.elapsed_s,
         browser_recycled=fetch.browser_recycled,
+        profile_rotated=report.profile_rotated_to is not None,
     )
     if findings is None:
         return record

@@ -101,6 +101,9 @@ MIGRATIONS: tuple[tuple[str, ...], ...] = (
         "ALTER TABLE polls ADD COLUMN parse_warnings INTEGER",
         "ALTER TABLE polls ADD COLUMN parse_degraded INTEGER NOT NULL DEFAULT 0",
     ),
+    (  # v3: automatic browser profile rotation
+        "ALTER TABLE polls ADD COLUMN profile_rotated INTEGER NOT NULL DEFAULT 0",
+    ),
 )
 """Schema migrations; entry ``i`` upgrades ``user_version`` i to i + 1."""
 
@@ -428,6 +431,7 @@ class Store:
             "browser_recycled": record.browser_recycled,
             "parse_warnings": record.parse_warnings,
             "parse_degraded": record.parse_degraded,
+            "profile_rotated": record.profile_rotated,
             **_snapshot_columns(record.snapshot),
             **_label_columns(InventoryType.PRIMARY, record.primary_labels),
             **_label_columns(InventoryType.RESALE, record.resale_labels),
@@ -732,6 +736,7 @@ def _poll_record(data: sqlite3.Row) -> PollRecord:
         browser_recycled=bool(data["browser_recycled"]),
         parse_warnings=data["parse_warnings"],
         parse_degraded=bool(data["parse_degraded"]),
+        profile_rotated=bool(data["profile_rotated"]),
     )
 
 

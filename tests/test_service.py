@@ -790,3 +790,153 @@ def test_no_healthchecks_ping_once_stop_is_requested(make_service: ServiceFactor
 
     assert svc.alert_push.sent
     assert svc.pinger.pings == 0
+
+
+# --- automatic browser profile rotation after the block page -----------------------------------
+
+BLOCK_PAGE = replace(BLOCKED, block_page=True)
+BLOCK_PAGE_ERROR = replace(
+    fetched(outcome=PollOutcome.ERROR, detail="missing quickpicks", resale_eligible=None),
+    block_page=True,
+)
+ROTATED = "ticket-poller: browser profile rotated after block"
+
+
+def restarted(svc: Service) -> Service:
+    """The same store, fetcher and senders behind a new ``Poller``, as after a restart."""
+    notifier = Notifier(
+        svc.email,
+        svc.alert_push,
+        svc.ops_push,
+        stop=svc.clock.stop,
+        wait=svc.clock.wait,
+        audit=audit_to(svc.store, svc.clock),
+    )
+    poller = Poller(
+        svc.settings,
+        svc.fetcher,
+        svc.store,
+        notifier,
+        svc.pinger,
+        svc.clock,
+        svc.clock.stop,
+        rng=Midpoint(),
+    )
+    return replace(svc, poller=poller)
+
+
+def rotated_polls(svc: Service) -> list[bool]:
+    return [poll.profile_rotated for poll in reversed(svc.store.recent_polls(100))]
+
+
+def test_the_block_page_rotates_the_profile_once_per_failure_streak(
+    make_service: ServiceFactory,
+) -> None:
+    svc = make_service(BLOCK_PAGE, BLOCK_PAGE, BLOCK_PAGE, NK, BLOCK_PAGE, NK)
+
+    svc.run_for(minutes(106))
+
+    # A rotation retries at the interval; blocked again, the block backoff goes on as before.
+    assert svc.poll_times() == [minutes(m) for m in (0, 5, 35, 95, 100, 105)]
+    assert svc.fetcher.rotations == [1, 5]
+    assert rotated_polls(svc) == [True, False, False, False, True, False]
+    assert [e.subject for e, _ in svc.email.sent if e.subject == ROTATED] == [ROTATED] * 2
+    assert [title[:30] for title in svc.ops_push.titles] == [OUTAGE[:30], RECOVERED[:30]]
+    assert not svc.store.get_state().profile_rotated_this_streak
+
+
+def test_a_block_page_error_rotates_and_a_later_block_backs_off_from_the_base(
+    make_service: ServiceFactory,
+) -> None:
+    svc = make_service(BLOCK_PAGE_ERROR, BLOCKED, NK)
+
+    svc.run_for(minutes(21))
+
+    assert svc.poll_times() == [minutes(m) for m in (0, 5, 20)]
+    assert svc.fetcher.rotations == [1]
+
+
+def test_the_rotation_notice_is_an_admin_email_only(make_service: ServiceFactory) -> None:
+    svc = make_service(BLOCK_PAGE_ERROR)
+
+    report = svc.poll()
+
+    assert report.profile_rotated_to is not None
+    ((email, to),) = svc.email.sent
+    assert (email.subject, to) == (ROTATED, (svc.settings.admin_email,))
+    assert "Poll detail: missing quickpicks" in email.body
+    assert f"Flagged profile: {report.profile_rotated_to}" in email.body
+    assert (svc.ops_push.calls, svc.alert_push.calls) == (0, 0)
+    assert svc.store.get_state().profile_rotated_this_streak
+    assert "browser profile rotated" in render_report(report, svc.settings)
+
+
+@pytest.mark.parametrize("failure", ["email", "bug"])
+def test_a_failing_rotation_notice_does_not_affect_polling(
+    make_service: ServiceFactory, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    svc = make_service(BLOCK_PAGE, NK)
+    if failure == "email":
+        svc.email.fail = True
+    else:
+        monkeypatch.setattr(messages, "profile_rotated", raise_bug)
+
+    svc.run_for(minutes(11))
+
+    assert svc.poll_times() == [minutes(0), minutes(5), minutes(10)]
+    assert rotated_polls(svc) == [True, False, False]
+    assert svc.store.get_state().consecutive_failures == 0
+
+
+def test_the_rotation_limit_survives_a_restart(make_service: ServiceFactory) -> None:
+    svc = make_service(BLOCK_PAGE)
+    svc.poll()
+    svc.clock.advance(2 * 60)  # systemd restarts the service
+
+    restarted(svc).run_for(minutes(16))
+
+    assert svc.poll_times() == [minutes(0), minutes(5)]  # resumed at the interval
+    assert svc.fetcher.rotations == [1]
+    assert svc.store.get_state().profile_rotated_this_streak
+
+
+def test_a_failed_rotation_is_retried_on_the_next_block(make_service: ServiceFactory) -> None:
+    svc = make_service(BLOCK_PAGE)
+    svc.fetcher.rotate_fails = True
+
+    first = svc.poll()
+    svc.fetcher.rotate_fails = False
+    second = svc.poll()
+
+    assert (first.profile_rotated_to, svc.fetcher.rotations) == (None, [1, 2])
+    assert second.profile_rotated_to is not None
+    assert [e.subject for e, _ in svc.email.sent] == [ROTATED]
+
+
+@pytest.mark.parametrize(
+    ("result", "env"),
+    [
+        (BLOCKED, {}),
+        (BLOCK_PAGE, {"BROWSER_PROFILE_ROTATE_ON_BLOCK": "false"}),
+    ],
+)
+def test_no_rotation_without_the_block_page_or_when_disabled(
+    make_service: ServiceFactory, result: FetchResult, env: dict[str, str]
+) -> None:
+    svc = make_service(result, **env)
+
+    svc.run_for(minutes(16))
+
+    assert svc.poll_times() == [minutes(0), minutes(15)]
+    assert svc.fetcher.rotations == []
+    assert svc.email.sent == []
+
+
+def test_a_dry_run_never_rotates(make_service: ServiceFactory) -> None:
+    svc = make_service(BLOCK_PAGE)
+
+    report = svc.poll(dry_run=True)
+
+    assert report.profile_rotated_to is None
+    assert (svc.fetcher.rotations, svc.fetcher.closes) == ([], 0)
+    assert svc.store.recent_polls(1) == []

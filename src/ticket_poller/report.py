@@ -54,6 +54,8 @@ def render_report(report: PollReport, settings: Settings) -> str:
         lines.append(f"detail: {report.detail}")
     if (hint := messages.failure_hint(report.outcome, report.detail)) is not None:
         lines.append(f"hint: {hint}")
+    if report.profile_rotated_to is not None:
+        lines.append(f"browser profile rotated: the blocked one is {report.profile_rotated_to}")
     if report.findings is not None:
         lines.extend(_findings_lines(report.findings, report, settings))
     return "\n".join(lines)

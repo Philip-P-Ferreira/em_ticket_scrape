@@ -3,6 +3,7 @@
 import json
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
+from pathlib import Path
 
 from ticket_poller.config import Settings
 from ticket_poller.fetcher import BrowserError, RawResponse, ResponsePredicate, ResponseSink
@@ -144,12 +145,13 @@ class FakeLauncher:
 
 
 class FakeFetcher:
-    """Returns ``result`` from ``fetch()`` and records ``close()``."""
+    """Returns ``result`` from ``fetch()`` and records ``close()`` and ``rotate_profile()``."""
 
     def __init__(self, result: FetchResult | None) -> None:
         self.result = result
         self.fetches = 0
         self.closed = False
+        self.rotations = 0
 
     def fetch(self) -> FetchResult | None:
         self.fetches += 1
@@ -158,26 +160,43 @@ class FakeFetcher:
     def close(self) -> None:
         self.closed = True
 
+    def rotate_profile(self) -> Path | None:
+        self.rotations += 1
+        return Path(f"profile.flagged-{self.rotations}")
+
 
 type FetchStep = FetchResult | Callable[[], FetchResult | None] | None
 
 
 class ScriptedFetcher:
     """Plays ``script`` one step per ``fetch()``; the last step repeats. A step may be a
-    callable, e.g. to set ``stop`` mid-capture."""
+    callable, e.g. to set ``stop`` mid-capture. ``rotate_profile()`` records the ``fetches``
+    count it was called at and succeeds unless ``rotate_fails`` is set; like the real one,
+    it must only be called with the browser closed."""
 
     def __init__(self, *script: FetchStep) -> None:
         self.script = list(script)
         self.fetches = 0
         self.closes = 0
+        self.open = False
+        self.rotations: list[int] = []
+        self.rotate_fails = False
 
     def fetch(self) -> FetchResult | None:
         step = self.script[min(self.fetches, len(self.script) - 1)]
         self.fetches += 1
+        self.open = True
         return step() if callable(step) else step
 
     def close(self) -> None:
         self.closes += 1
+        self.open = False
+
+    def rotate_profile(self) -> Path | None:
+        if self.open:
+            raise AssertionError("rotate_profile() with the browser open")
+        self.rotations.append(self.fetches)
+        return None if self.rotate_fails else Path(f"profile.flagged-{len(self.rotations)}")
 
 
 @dataclass

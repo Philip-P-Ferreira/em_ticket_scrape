@@ -72,6 +72,7 @@ class NoticeKind(StrEnum):
     RESALE_MISSING = "resale_missing"
     FINISHED = "finished"
     EMAIL_FAILING = "email_failing"
+    PROFILE_ROTATED = "profile_rotated"
     SERVICE_FAILED = "service_failed"
     TEST = "test"
 
@@ -172,3 +173,5 @@ class FetchResult:
     resale_eligible: bool | None
     elapsed_s: float
     browser_recycled: bool = False
+    block_page: bool = False
+    """Ticketmaster's block page was shown, whatever the outcome (data present wins)."""

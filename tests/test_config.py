@@ -61,6 +61,16 @@ class TestDefaults:
         assert settings.alert_recipients == ("philip@ferreira-family.com",)
         assert settings.browser_extra_args == ("--ozone-platform=x11",)
         assert settings.ops_topic.get_secret_value() == NTFY_OPS_TOPIC
+        assert settings.browser_profile_rotate_on_block is True
+        assert settings.browser_profile_keep_flagged == 2
+
+    def test_profile_rotation_can_be_tuned(self, make_env_file: EnvFileFactory) -> None:
+        settings = load_settings(
+            make_env_file(BROWSER_PROFILE_ROTATE_ON_BLOCK="false", BROWSER_PROFILE_KEEP_FLAGGED="0")
+        )
+
+        assert settings.browser_profile_rotate_on_block is False
+        assert settings.browser_profile_keep_flagged == 0
 
     def test_stop_after_is_localized_to_timezone(self, make_env_file: EnvFileFactory) -> None:
         settings = load_settings(make_env_file())
@@ -198,6 +208,8 @@ class TestValidation:
             ({"CANARY_HOUR": "24"}, "CANARY_HOUR"),
             ({"POLL_JITTER_SECONDS": "300"}, "POLL_JITTER_SECONDS"),
             ({"LOG_LEVEL": "LOUD"}, "LOG_LEVEL"),
+            ({"BROWSER_PROFILE_KEEP_FLAGGED": "-1"}, "BROWSER_PROFILE_KEEP_FLAGGED"),
+            ({"BROWSER_PROFILE_ROTATE_ON_BLOCK": "maybe"}, "BROWSER_PROFILE_ROTATE_ON_BLOCK"),
             ({"NTFY_SERVER": "ntfy.sh"}, "http(s) URL"),
             ({"HEALTHCHECKS_PING_URL": "hc-ping.com/abcdef"}, "http(s) URL"),
             ({"SENDER_APP_PASSWORD": None}, "SENDER_APP_PASSWORD"),

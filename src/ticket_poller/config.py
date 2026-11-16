@@ -136,6 +136,8 @@ class Settings(BaseSettings):
     # Browser
     chromium_path: ConfigPath = Path("/usr/bin/chromium")
     browser_profile_dir: ConfigPath = Path("~/.local/share/em_ticket_scrape/chromium-profile")
+    browser_profile_rotate_on_block: bool = True
+    browser_profile_keep_flagged: NonNegativeInt = 2
     browser_extra_args: CsvStrings = ("--ozone-platform=x11",)
     browser_recycle_hours: PositiveFloat = 6.0
     capture_timeout_seconds: PositiveFloat = 20.0

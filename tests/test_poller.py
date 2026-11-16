@@ -25,6 +25,7 @@ from ticket_poller.store import Store, key_matches
 NOW = datetime(2026, 11, 14, 15, 0, tzinfo=UTC)
 PRIMARY = (load_captured("nk_facets_inventorytypes_offer"), load_captured("nk_quickpicks_qty2"))
 QP3 = load_captured("nk_quickpicks_qty3")
+BLOCK_PAGE = FetchResult(PollOutcome.ERROR, (), "missing quickpicks", None, 11.24, block_page=True)
 
 
 def fetched(
@@ -261,3 +262,39 @@ class TestPollOnceCommand:
             (poll,) = store.recent_polls(5)
             assert poll.outcome is PollOutcome.OK
             assert store.get_state().consecutive_failures == 0
+
+    def test_a_dry_run_never_rotates_the_profile(
+        self, settings: Settings, fake_fetcher: FakeFetcher, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        fake_fetcher.result = BLOCK_PAGE
+
+        assert main(["poll-once"]) == ExitCode.CRASH
+
+        assert fake_fetcher.rotations == 0
+        assert "rotated" not in capsys.readouterr().out
+
+    def test_notify_rotates_the_profile_after_the_block_page(
+        self,
+        settings: Settings,
+        fake_fetcher: FakeFetcher,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        fake_fetcher.result = BLOCK_PAGE
+        email, push = FakeEmailSender(), FakePushSender()
+
+        def fake_notifier(settings: Settings, client: object, **kwargs: Any) -> Notifier:
+            return Notifier(email, push, push, **kwargs)
+
+        monkeypatch.setattr(notify, "build_notifier", fake_notifier)
+
+        assert main(["poll-once", "--notify"]) == ExitCode.CRASH
+
+        assert fake_fetcher.rotations == 1
+        assert "browser profile rotated: the blocked one is" in capsys.readouterr().out
+        assert [(e.subject, to) for e, to in email.sent] == [
+            ("ticket-poller: browser profile rotated after block", (settings.admin_email,))
+        ]
+        assert push.calls == 0
+        with Store.open_readonly(settings.db_path) as store:
+            assert store.get_state().profile_rotated_this_streak

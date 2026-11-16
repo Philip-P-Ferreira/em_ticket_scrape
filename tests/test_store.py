@@ -177,7 +177,7 @@ class TestOpening:
     def test_writer_creates_the_latest_schema(self, store: Store) -> None:
         tables = {row[0] for row in store._conn.execute("SELECT name FROM sqlite_master")}
 
-        assert pragma(store, "user_version") == schema_version() == 2
+        assert pragma(store, "user_version") == schema_version() == 3
         assert {"polls", "listings", "alert_deliveries", "notifications", "kv"} <= tables
         assert {"polls_started_at", "listings_offer"} <= tables
 
@@ -269,6 +269,25 @@ class TestMigrations:
             assert pragma(writer, "user_version") == schema_version()
 
         assert (old.parse_warnings, old.parse_degraded) == (None, False)
+
+    def test_v2_database_gains_the_profile_rotated_column(self, db_path: Path) -> None:
+        conn = sqlite3.connect(db_path)
+        for statement in (*MIGRATIONS[0], *MIGRATIONS[1]):
+            conn.execute(statement)
+        conn.execute(
+            "INSERT INTO polls (started_at, outcome) VALUES (?, 'blocked')", (T0.isoformat(),)
+        )
+        conn.execute("PRAGMA user_version = 2")
+        conn.commit()
+        conn.close()
+
+        with Store.open_writer(db_path) as writer:
+            [old] = writer.recent_polls(1)
+            writer.record_poll(PollRecord(at(0, 5), PollOutcome.BLOCKED, profile_rotated=True))
+            [new, _] = writer.recent_polls(2)
+            assert pragma(writer, "user_version") == schema_version()
+
+        assert (old.profile_rotated, new.profile_rotated) == (False, True)
 
     def test_failed_migration_rolls_back(
         self, store: Store, db_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -800,6 +819,7 @@ class TestRuntimeStatePersistence:
             failure_started_at=T0,
             consecutive_failures=4,
             consecutive_blocks=2,
+            profile_rotated_this_streak=True,
             outage_announced=True,
             recovery_pending=True,
             last_outage_duration_s=4321.5,
@@ -856,6 +876,18 @@ class TestRuntimeStateTransitions:
 
     def test_success_when_healthy_changes_nothing(self) -> None:
         assert RuntimeState().record_success(T0) == RuntimeState()
+
+    def test_one_profile_rotation_per_failure_streak(self) -> None:
+        rotated = RuntimeState().record_failure(PollOutcome.BLOCKED, T0).record_profile_rotation()
+        blocked_again = rotated.record_failure(PollOutcome.ERROR, at(minutes=5))
+
+        assert rotated.profile_rotated_this_streak
+        assert blocked_again.profile_rotated_this_streak
+        assert not blocked_again.record_success(at(minutes=10)).profile_rotated_this_streak
+
+    def test_a_profile_rotation_needs_a_failure_streak(self) -> None:
+        with pytest.raises(ValueError, match="failure streak"):
+            RuntimeState().record_profile_rotation()
 
     def test_unannounced_outage_recovers_silently(self) -> None:
         state = RuntimeState().record_failure(PollOutcome.ERROR, T0).record_success(at(0, 30))

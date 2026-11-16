@@ -122,10 +122,27 @@ systemctl --user start ticket-poller
 
 Never delete the profile's `Singleton*` files.
 
+## When Ticketmaster blocks the profile
+
+Ticketmaster flags a profile after hours of polling, while a fresh profile on the same IP
+passes. So when a poll gets the block page ("Your Browsing Activity Has Been Paused",
+document 401/403, even if the poll is logged as an ERROR such as "missing quickpicks"), the
+poller closes the browser and renames the profile to
+`chromium-profile.flagged-<UTC YYYYmmddTHHMMSSZ>` in the same directory
+(`~/.local/share/em_ticket_scrape/` by default); the next poll, at the normal interval
+rather than the block backoff, starts from a fresh profile. It does this at most once per
+failure streak (remembered across restarts); if the fresh profile is blocked too, the normal
+block backoff applies. Each rotation logs `browser profile rotated after block: <old> ->
+<new>` and emails `ADMIN_EMAIL` (no push). Only the newest `BROWSER_PROFILE_KEEP_FLAGGED`
+(default 2) `chromium-profile.flagged-*` directories are kept, by modification time,
+including ones renamed by hand. `BROWSER_PROFILE_ROTATE_ON_BLOCK=false` turns this off.
+A dry-run `poll-once` never rotates; `poll-once --notify` does.
+
 ## Troubleshooting
 
-- **blocked** (outage notice says Ticketmaster is blocking): the poller backs off up to
-  60 min by itself. If it persists, open the event page in the profile by hand (above).
+- **blocked** (outage notice says Ticketmaster is blocking): the poller rotates the profile
+  once (above), then backs off up to 60 min by itself. If it persists, open the event page
+  in the profile by hand (above).
 - **profile_in_use**: a manual Chromium is open on the poller's profile; quit it. The poller
   retries with backoff.
 - **no_display** or the unit fails its `DISPLAY` assertion: the graphical session isn't

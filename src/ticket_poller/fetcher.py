@@ -8,11 +8,15 @@ import json
 import logging
 import os
 import re
+import shutil
+import stat
 import threading
 import time
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any, Final, Protocol
 from urllib.parse import parse_qs, urlsplit
 
@@ -21,7 +25,7 @@ from playwright.sync_api import Locator, Page, Playwright, sync_playwright
 from playwright.sync_api import Response as PlaywrightResponse
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
-from ticket_poller.config import Settings
+from ticket_poller.config import PRIVATE_DIR_MODE, Settings
 from ticket_poller.dumps import try_write_dump
 from ticket_poller.models import CapturedResponse, FetchResult, PollOutcome
 from ticket_poller.parsing import quickpicks_qty
@@ -35,6 +39,7 @@ QTY_SELECTOR: Final = "#filter-bar-quantity"
 
 BLOCK_TITLES: Final = ("Browsing Activity Has Been Paused", "Identity Verified")
 BLOCKED_DOCUMENT_STATUSES: Final = frozenset({401, 403})
+FLAGGED_PROFILE_MARK: Final = ".flagged-"
 PROFILE_IN_USE: Final = "profile_in_use"
 PROFILE_IN_USE_MESSAGE: Final = (
     "Chromium profile is in use by another Chromium (manual session?). "
@@ -109,6 +114,13 @@ class Fetcher(Protocol):
         ...
 
     def close(self) -> None: ...
+
+    def rotate_profile(self) -> Path | None:
+        """Set the closed browser's profile aside so the next launch starts a fresh one.
+
+        Returns where it went, or None if it was left in place.
+        """
+        ...
 
 
 # --- pure helpers ---------------------------------------------------------------------------
@@ -252,14 +264,17 @@ class PlaywrightFetcher:
         *,
         launcher: Launcher | None = None,
         monotonic: Callable[[], float] = time.monotonic,
+        wall_clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         environ: Mapping[str, str] | None = None,
     ) -> None:
         self._settings = settings
         self._stop = stop
         self._launcher = launcher if launcher is not None else launch_chromium
         self._monotonic = monotonic
+        self._wall_clock = wall_clock
         self._environ = os.environ if environ is None else environ
         self._tab: BrowserTab | None = None
+        self._close_failed = False
         self._launched_at = 0.0
         self._responses: list[CapturedResponse] = []
         self._blocklisted = False
@@ -287,7 +302,36 @@ class PlaywrightFetcher:
         try:
             tab.close()
         except BrowserError as exc:
+            self._close_failed = True
             log.warning("closing the browser failed: %s", first_line(exc))
+        else:
+            self._close_failed = False
+
+    def rotate_profile(self) -> Path | None:
+        """Rename the profile to ``<name>.flagged-<UTC time>`` beside it, then prune old ones.
+
+        Refused while the browser may still be running (a tab is held or closing it failed);
+        a failure is logged and leaves the profile in place.
+        """
+        profile = self._settings.browser_profile_dir
+        if self._tab is not None or self._close_failed:
+            log.warning("browser profile not rotated: the browser may still be running")
+            return None
+        flagged = flagged_profile_path(profile, self._wall_clock())
+        try:
+            if os.path.lexists(flagged):
+                raise FileExistsError(f"{flagged} already exists")
+            profile.rename(flagged)
+        except OSError as exc:
+            log.warning("browser profile not rotated: %s", exc)
+            return None
+        log.warning("browser profile rotated after block: %s -> %s", profile, flagged)
+        try:
+            profile.mkdir(mode=PRIVATE_DIR_MODE)
+        except OSError as exc:
+            log.warning("cannot create the fresh browser profile %s: %s", profile, exc)
+        prune_flagged_profiles(profile, self._settings.browser_profile_keep_flagged)
+        return flagged
 
     # --- browser lifecycle
 
@@ -371,6 +415,7 @@ class PlaywrightFetcher:
             resale_eligible=parse_resale_eligibility(html),
             elapsed_s=self._monotonic() - started,
             browser_recycled=recycled,
+            block_page=outcome is not PollOutcome.OK and bool(block_signals(evidence)),
         )
 
     def _navigate(self, tab: BrowserTab, *, fresh: bool) -> RawResponse | None:
@@ -435,6 +480,47 @@ def _blocklisted(response: RawResponse | None) -> bool:
         return response.header_value("tm-bl") == "1"
     except BrowserError:
         return False
+
+
+def flagged_profile_path(profile: Path, at: datetime) -> Path:
+    """Where a blocked profile is set aside: ``<name>.flagged-YYYYmmddTHHMMSSZ`` beside it."""
+    return profile.with_name(
+        f"{profile.name}{FLAGGED_PROFILE_MARK}{at.astimezone(UTC):%Y%m%dT%H%M%SZ}"
+    )
+
+
+def prune_flagged_profiles(profile: Path, keep: int) -> list[Path]:
+    """Delete all but the newest ``keep`` flagged profiles beside ``profile``; returns those
+    deleted.
+
+    Only real directories directly in its parent named ``<name>.flagged-*`` count (newest
+    by mtime, so hand-named ones like ``chromium-profile.flagged-20261114`` sort right too);
+    symlinks are never followed. Errors are logged, not raised.
+    """
+    prefix = profile.name + FLAGGED_PROFILE_MARK
+    try:
+        names = [path for path in profile.parent.iterdir() if path.name.startswith(prefix)]
+    except OSError as exc:
+        log.warning("cannot list flagged browser profiles: %s", exc)
+        return []
+    flagged: list[tuple[float, str, Path]] = []
+    for path in names:
+        try:
+            info = path.lstat()
+        except OSError:
+            continue
+        if stat.S_ISDIR(info.st_mode):  # lstat: a symlink is never a directory here
+            flagged.append((info.st_mtime, path.name, path))
+    deleted = []
+    for _, _, path in sorted(flagged, reverse=True)[keep:]:
+        try:
+            shutil.rmtree(path)
+        except OSError as exc:
+            log.warning("cannot delete flagged browser profile %s: %s", path, exc)
+        else:
+            log.info("deleted flagged browser profile %s", path)
+            deleted.append(path)
+    return deleted
 
 
 def build_fetcher(settings: Settings, stop: threading.Event) -> Fetcher:

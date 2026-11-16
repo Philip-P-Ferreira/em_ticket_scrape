@@ -8,6 +8,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, tzinfo
 from decimal import ROUND_DOWN, ROUND_HALF_UP, Decimal
+from pathlib import Path
 from typing import Final
 from zoneinfo import ZoneInfo
 
@@ -630,6 +631,21 @@ def finished(*, ctx: MessageContext) -> Notice:
         3,
         ("checkered_flag",),
     )
+
+
+def profile_rotated(*, detail: str, flagged: Path, keep: int) -> Notice:
+    """Email only: the poller recovers by itself, so this must not reach the push topic."""
+    subject = "ticket-poller: browser profile rotated after block"
+    body = (
+        "Ticketmaster showed its block page, so the poller set its Chromium profile aside; "
+        "the next poll, at the normal interval, starts with a fresh profile.",
+        f"Poll detail: {detail or '(none)'}",
+        f"Flagged profile: {flagged}",
+        f"Only the newest {keep} flagged profile(s) are kept.",
+        "This happens at most once per failure streak: if the fresh profile is blocked too, "
+        "the usual block backoff and outage notice follow.",
+    )
+    return Notice(NoticeKind.PROFILE_ROTATED, Email(subject, "\n".join(body) + "\n"), None)
 
 
 def email_failing(*, failures: int, auth_rejected: bool) -> Push:

@@ -35,6 +35,8 @@ class PollRecord:
     """How many parser warnings the poll's inventory had (None if nothing was parsed)."""
     parse_degraded: bool = False
     """The parser dropped data it should have read (malformed or unparsable quickpicks)."""
+    profile_rotated: bool = False
+    """The browser profile was set aside after this poll saw the block page."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,6 +89,7 @@ class RuntimeState:
     failure_started_at: datetime | None = None
     consecutive_failures: int = 0
     consecutive_blocks: int = 0
+    profile_rotated_this_streak: bool = False
     outage_announced: bool = False
     recovery_pending: bool = False
     last_outage_duration_s: float | None = None
@@ -121,10 +124,17 @@ class RuntimeState:
             failure_started_at=None,
             consecutive_failures=0,
             consecutive_blocks=0,
+            profile_rotated_this_streak=False,
             outage_announced=False,
             recovery_pending=self.recovery_pending or announced,
             last_outage_duration_s=duration if announced else self.last_outage_duration_s,
         )
+
+    def record_profile_rotation(self) -> Self:
+        """At most one rotation per failure streak; ``record_success`` allows the next."""
+        if self.failure_started_at is None:
+            raise ValueError("a profile rotation needs a failure streak")
+        return replace(self, profile_rotated_this_streak=True)
 
     def record_outage_notice(self, delivered: bool) -> Self:
         """The outage counts as announced only once at least one channel delivered."""

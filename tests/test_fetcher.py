@@ -1,8 +1,12 @@
 import json
 import logging
+import os
 import re
 import threading
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import ClassVar, cast
+from zoneinfo import ZoneInfo
 
 import pytest
 from playwright.sync_api import Response as PlaywrightResponse
@@ -18,10 +22,12 @@ from ticket_poller.fetcher import (
     PlaywrightFetcher,
     classify_failure,
     classify_launch_error,
+    flagged_profile_path,
     has_display,
     is_ismds_url,
     is_offer_facets,
     parse_resale_eligibility,
+    prune_flagged_profiles,
     read_response,
     recycle_due,
 )
@@ -30,6 +36,8 @@ from ticket_poller.models import CapturedResponse, FetchResult, PollOutcome
 from ticket_poller.parsing import parse_inventory
 
 EVENT_ID = "2000655CAB442FB5"
+WALL = datetime(2026, 11, 14, 21, 5, 9, tzinfo=UTC)
+FLAGGED = "profile.flagged-20261114T210509Z"
 OFFERADAPTER = f"https://offeradapter.ticketmaster.com/api/ismds/event/{EVENT_ID}"
 PAUSED = "Your Browsing Activity Has Been Paused"
 # The real Playwright error when a manual Chromium holds the profile (checked on Chromium 14x).
@@ -301,6 +309,7 @@ def make_fetcher(
         stop if stop is not None else threading.Event(),
         launcher=launcher,
         monotonic=time,
+        wall_clock=lambda: WALL,
         environ={"DISPLAY": ":0"} if environ is None else environ,
     )
 
@@ -636,3 +645,238 @@ class TestFetch:
         fetcher.close()
 
         assert launcher.tabs[0].closed
+
+
+def blocked_document() -> FakeRawResponse:
+    return FakeRawResponse("https://www.ticketmaster.com/event/x", 403, None, {"tm-bl": "1"})
+
+
+def make_dir(path: Path, *, mtime: float | None = None) -> Path:
+    path.mkdir(parents=True)
+    (path / "Local State").write_text("{}", encoding="utf-8")
+    if mtime is not None:
+        os.utime(path, (mtime, mtime))
+    return path
+
+
+class TestBlockPage:
+    @pytest.mark.parametrize(
+        "changes",
+        [
+            {"on_load": (), "document": blocked_document(), "title": PAUSED},
+            {"on_load": ((1.0, raw(DYNAMIC_BLOCK)),)},
+            # Data arrived before the page turned into the block page: ERROR, but blocked.
+            {"on_load": ((1.0, raw(OFFER_FACETS)),), "title": PAUSED},
+            {"on_load": ((1.0, raw(OFFER_FACETS)),), "document": blocked_document()},
+        ],
+    )
+    def test_block_signals_mark_the_block_page(
+        self, settings: Settings, time: FakeTime, changes: dict[str, object]
+    ) -> None:
+        result = make_fetcher(settings, FakeLauncher(event_page(**changes), time), time).fetch()
+
+        assert result is not None
+        assert result.outcome is not PollOutcome.OK
+        assert result.block_page
+
+    @pytest.mark.parametrize(
+        "changes",
+        [
+            {},
+            {"on_load": ()},
+            {"on_load": ((1.0, raw(OFFER_FACETS)),)},
+            {"navigation_error": "Page.goto: net::ERR_NAME_NOT_RESOLVED"},
+        ],
+    )
+    def test_other_results_are_not_the_block_page(
+        self, settings: Settings, time: FakeTime, changes: dict[str, object]
+    ) -> None:
+        result = make_fetcher(settings, FakeLauncher(event_page(**changes), time), time).fetch()
+
+        assert result is not None
+        assert not result.block_page
+
+    @pytest.mark.parametrize("error", [PROFILE_IN_USE_ERROR, "spawn /usr/bin/chromium ENOENT"])
+    def test_launch_errors_are_not_the_block_page(
+        self, settings: Settings, time: FakeTime, error: str
+    ) -> None:
+        launcher = FakeLauncher(event_page(), time, error=error)
+
+        result = make_fetcher(settings, launcher, time).fetch()
+
+        assert result is not None
+        assert not result.block_page
+
+
+class TestRotateProfile:
+    @pytest.fixture
+    def profile(self, settings: Settings) -> Path:
+        return make_dir(settings.browser_profile_dir)
+
+    def blocked(self, settings: Settings, time: FakeTime) -> PlaywrightFetcher:
+        script = event_page(on_load=((1.0, raw(OFFER_FACETS)),), title=PAUSED)
+        fetcher = make_fetcher(settings, FakeLauncher(script, time), time)
+        result = fetcher.fetch()
+        assert result is not None
+        assert result.block_page
+        return fetcher
+
+    def test_renames_the_profile_beside_itself(
+        self,
+        settings: Settings,
+        time: FakeTime,
+        profile: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        flagged = self.blocked(settings, time).rotate_profile()
+
+        assert flagged == profile.parent / FLAGGED
+        assert (flagged / "Local State").exists()
+        assert profile.is_dir()
+        assert list(profile.iterdir()) == []
+        assert f"browser profile rotated after block: {profile} -> {flagged}" in caplog.text
+
+    def test_flagged_name_is_utc(self) -> None:
+        local = WALL.astimezone(ZoneInfo("America/Chicago"))
+
+        assert flagged_profile_path(Path("/x/profile"), local) == Path("/x") / FLAGGED
+
+    def test_missing_profile_is_left_alone(
+        self, settings: Settings, time: FakeTime, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        assert self.blocked(settings, time).rotate_profile() is None
+        assert "browser profile not rotated" in caplog.text
+        assert not settings.browser_profile_dir.exists()
+
+    def test_rename_failure_is_tolerated(
+        self,
+        settings: Settings,
+        time: FakeTime,
+        profile: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        def refuse(self: Path, target: Path) -> Path:
+            raise PermissionError("read-only file system")
+
+        monkeypatch.setattr(Path, "rename", refuse)
+
+        assert self.blocked(settings, time).rotate_profile() is None
+        assert "browser profile not rotated: read-only file system" in caplog.text
+        assert (profile / "Local State").exists()
+
+    def test_an_existing_target_is_never_replaced(
+        self, settings: Settings, time: FakeTime, profile: Path
+    ) -> None:
+        taken = make_dir(profile.parent / FLAGGED)
+
+        assert self.blocked(settings, time).rotate_profile() is None
+        assert (profile / "Local State").exists()
+        assert (taken / "Local State").exists()
+
+    def test_refused_while_the_browser_is_open(
+        self, settings: Settings, time: FakeTime, profile: Path
+    ) -> None:
+        fetcher = make_fetcher(settings, FakeLauncher(event_page(), time), time)
+        result = fetcher.fetch()
+        assert result is not None
+        assert result.outcome is PollOutcome.OK
+
+        assert fetcher.rotate_profile() is None
+        assert (profile / "Local State").exists()
+
+    def test_refused_when_closing_the_browser_failed(
+        self,
+        settings: Settings,
+        time: FakeTime,
+        profile: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        launcher = FakeLauncher(event_page(), time)
+        fetcher = make_fetcher(settings, launcher, time)
+        fetcher.fetch()
+
+        def fail() -> None:
+            raise BrowserError("Browser.close: Target closed")
+
+        monkeypatch.setattr(launcher.tabs[0], "close", fail)
+        fetcher.close()
+
+        assert fetcher.rotate_profile() is None
+        assert (profile / "Local State").exists()
+
+    def test_prunes_all_but_the_newest_flagged(
+        self, settings: Settings, time: FakeTime, profile: Path
+    ) -> None:
+        parent = profile.parent
+        make_dir(parent / "profile.flagged-20261110", mtime=1_000)
+        make_dir(parent / "profile.flagged-20261114", mtime=3_000)
+        make_dir(parent / "profile.flagged-20261112T010203Z", mtime=2_000)
+
+        self.blocked(settings, time).rotate_profile()
+
+        assert sorted(path.name for path in parent.glob("profile*")) == [
+            "profile",
+            "profile.flagged-20261114",
+            FLAGGED,
+        ]
+
+
+class TestPruneFlaggedProfiles:
+    def test_keeps_the_newest_by_mtime(self, tmp_path: Path) -> None:
+        old = make_dir(tmp_path / "chromium-profile.flagged-20261114", mtime=1_000)
+        new = make_dir(tmp_path / "chromium-profile.flagged-20261101T000000Z", mtime=2_000)
+
+        deleted = prune_flagged_profiles(tmp_path / "chromium-profile", 1)
+
+        assert deleted == [old]
+        assert [path.name for path in tmp_path.iterdir()] == [new.name]
+
+    def test_keep_zero_deletes_every_flagged_profile(self, tmp_path: Path) -> None:
+        profile = make_dir(tmp_path / "chromium-profile")
+        make_dir(tmp_path / "chromium-profile.flagged-a")
+        make_dir(tmp_path / "chromium-profile.flagged-b")
+
+        prune_flagged_profiles(profile, 0)
+
+        assert list(tmp_path.iterdir()) == [profile]
+
+    def test_only_matching_directories_are_touched(self, tmp_path: Path) -> None:
+        elsewhere = make_dir(tmp_path / "elsewhere" / "data")
+        kept = [
+            make_dir(tmp_path / "chromium-profile"),
+            make_dir(tmp_path / "chromium-profile.bak"),
+            make_dir(tmp_path / "other-profile.flagged-20261114"),
+            make_dir(tmp_path / "xchromium-profile.flagged-20261114"),
+            make_dir(tmp_path / "chromium-profile" / "chromium-profile.flagged-nested"),
+            tmp_path / "elsewhere",
+        ]
+        file = tmp_path / "chromium-profile.flagged-file"
+        file.write_text("not a profile", encoding="utf-8")
+        link = tmp_path / "chromium-profile.flagged-link"
+        link.symlink_to(elsewhere, target_is_directory=True)
+
+        deleted = prune_flagged_profiles(tmp_path / "chromium-profile", 0)
+
+        assert deleted == []
+        assert all(path.exists() for path in kept)
+        assert file.exists()
+        assert link.is_symlink()
+        assert (elsewhere / "Local State").exists()
+
+    def test_errors_are_logged_not_raised(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        make_dir(tmp_path / "chromium-profile.flagged-a")
+
+        def refuse(path: Path) -> None:
+            raise PermissionError("busy")
+
+        monkeypatch.setattr("ticket_poller.fetcher.shutil.rmtree", refuse)
+
+        assert prune_flagged_profiles(tmp_path / "chromium-profile", 0) == []
+        assert "cannot delete flagged browser profile" in caplog.text
+        assert prune_flagged_profiles(tmp_path / "missing" / "chromium-profile", 0) == []
